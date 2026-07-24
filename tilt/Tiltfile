@@ -15,8 +15,8 @@
 #
 # `repos_load` and `repos_status_ui`'s `git-status` resource shell out to
 # `repos`, which finds its registry by walking up from the working directory for
-# `repos.json` — so the loading Tiltfile must sit at (or under) the dev-env root
-# that holds `repos.json`.
+# `tilt-devenv.json` — so the loading Tiltfile must sit at (or under) the dev-env root
+# that holds `tilt-devenv.json`.
 
 def repos_load(clone_missing=True):
     """Resolve every repo via `repos list --json` and return a dict keyed by
@@ -24,12 +24,12 @@ def repos_load(clone_missing=True):
     `clone_missing` is set, repos not yet on disk are cloned first.
 
     A dict has no order; if the caller needs the registry order (the order of
-    `repos.json`), iterate `repos_resolve()` instead."""
+    `tilt-devenv.json`), iterate `repos_resolve()` instead."""
     return {r.name: r for r in repos_resolve(clone_missing=clone_missing)}
 
 def repos_resolve(clone_missing=True):
     """Like `repos_load`, but returns a list in registry order (the order of
-    `repos.json`)."""
+    `tilt-devenv.json`)."""
     # Reload the Tiltfile when the active worktree selection changes, so picking
     # a worktree on a resource re-resolves its path and restarts it.
     watch_file(str(local('repos worktree state-path', quiet=True, echo_off=True)).strip())

@@ -1,6 +1,6 @@
 # Demo of the `repos` Tilt extension, runnable in isolation.
 #
-#   ./bootstrap.sh    # create local demo repos + repos.json (offline)
+#   ./bootstrap.sh    # create local demo repos + tilt-devenv.json (offline)
 #   tilt up           # from inside `nix develop` (provides `repos` + `tilt`)
 #
 # This demo is local-only (no Kubernetes); allow whatever kube context is

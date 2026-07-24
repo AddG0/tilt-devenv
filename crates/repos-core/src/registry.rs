@@ -1,4 +1,4 @@
-//! Loads the shared `repos.json` registry and resolves each declared repo to its
+//! Loads the shared `tilt-devenv.json` registry and resolves each declared repo to its
 //! on-disk location, mirroring the Tiltfile's path-resolution rules (active
 //! worktree > per-repo override > ghq checkout > sibling directory).
 //!
@@ -12,13 +12,46 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-/// One entry from `repos.json`.
+/// The dev-environment manifest, found at the dev-env repo root.
+const MANIFEST: &str = "tilt-devenv.json";
+
+/// One entry from `tilt-devenv.json`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Repo {
     pub name: String,
     pub url: String,
     #[serde(default)]
     pub group: String,
+}
+
+#[derive(Deserialize)]
+struct RegistryConfig {
+    /// Base directory repos resolve under, relative to the dev-env root (or
+    /// absolute / `~`). Empty resolves repos directly under the root.
+    #[serde(default)]
+    workspace: String,
+    repos: Vec<Repo>,
+}
+
+/// The `tilt-devenv.json` file: the object form, or a bare `[...]` array of repos
+/// (equivalent to the object with no extra config).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RegistryFile {
+    Bare(Vec<Repo>),
+    Config(RegistryConfig),
+}
+
+impl RegistryFile {
+    fn into_config(self) -> RegistryConfig {
+        match self {
+            RegistryFile::Bare(repos) => RegistryConfig {
+                workspace: String::new(),
+                repos,
+            },
+            RegistryFile::Config(cfg) => cfg,
+        }
+    }
 }
 
 /// A [`Repo`] paired with its resolved on-disk path and whether that path is a
@@ -31,10 +64,10 @@ pub struct Resolved {
 }
 
 /// The parsed registry plus the resolution config (workspace base and per-repo
-/// overrides) discovered alongside `repos.json`.
+/// overrides) discovered alongside `tilt-devenv.json`.
 #[derive(Debug)]
 pub struct Registry {
-    /// Directory containing `repos.json` (the dev-env repo root).
+    /// Directory containing `tilt-devenv.json` (the dev-env repo root).
     pub root: PathBuf,
     pub repos: Vec<Repo>,
     /// Base dir for the sibling layout.
@@ -48,7 +81,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Finds `repos.json` (searching cwd upward), parses it, and reads any
+    /// Finds `tilt-devenv.json` (searching cwd upward), parses it, and reads any
     /// `tilt_config.json` overrides next to it so the tool and Tilt agree on paths.
     pub fn load() -> Result<Registry> {
         Registry::load_from(&find_root()?)
@@ -56,18 +89,24 @@ impl Registry {
 
     /// Loads the registry rooted at a specific directory. Exposed for tests.
     pub fn load_from(root: &Path) -> Result<Registry> {
-        let data = std::fs::read(root.join("repos.json"))
-            .with_context(|| format!("reading repos.json in {}", root.display()))?;
-        let repos: Vec<Repo> = serde_json::from_slice(&data).context("parsing repos.json")?;
+        let data = std::fs::read(root.join(MANIFEST))
+            .with_context(|| format!("reading {MANIFEST} in {}", root.display()))?;
+        let cfg = serde_json::from_slice::<RegistryFile>(&data)
+            .with_context(|| format!("parsing {MANIFEST}"))?
+            .into_config();
 
         let mut reg = Registry {
             root: root.to_path_buf(),
-            repos,
+            repos: cfg.repos,
             workspace: root.to_path_buf(),
             overrides: HashMap::new(),
             worktrees: HashMap::new(),
             ghq_roots: Vec::new(),
         };
+        // tilt-devenv.json's workspace is the default base; tilt_config.json (below) overrides it.
+        if !cfg.workspace.is_empty() {
+            reg.workspace = expand_path(&cfg.workspace, root, dirs::home_dir().as_deref());
+        }
         if let Err(e) = reg.load_tilt_config(root) {
             // Non-fatal: overrides just don't apply. But warn — a silently
             // ignored malformed config is exactly the debugging trap to avoid.
@@ -202,7 +241,7 @@ fn ghq_relpath(url: &str) -> Option<String> {
 }
 
 /// The dev-environment root: walks up from the working directory for
-/// `repos.json`, or `REPOS_ROOT` if set. The directory tools resolve paths
+/// `tilt-devenv.json`, or `REPOS_ROOT` if set. The directory tools resolve paths
 /// (and per-developer state) against.
 pub fn find_root() -> Result<PathBuf> {
     if let Ok(env) = std::env::var("REPOS_ROOT")
@@ -213,11 +252,11 @@ pub fn find_root() -> Result<PathBuf> {
     let start = std::env::current_dir()?;
     start
         .ancestors()
-        .find(|dir| dir.join("repos.json").exists())
+        .find(|dir| dir.join(MANIFEST).exists())
         .map(Path::to_path_buf)
         .ok_or_else(|| {
             anyhow!(
-                "repos.json not found in {} or any parent (set REPOS_ROOT to override)",
+                "{MANIFEST} not found in {} or any parent (set REPOS_ROOT to override)",
                 start.display()
             )
         })
@@ -288,7 +327,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         write_file(
             root.path(),
-            "repos.json",
+            "tilt-devenv.json",
             r#"[{"name":"foo","url":"git@gitlab.com:X/Y/Foo.git","group":"service"}]"#,
         );
 
@@ -305,7 +344,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         write_file(
             root.path(),
-            "repos.json",
+            "tilt-devenv.json",
             r#"[{"name":"foo","url":"u","group":"g"}]"#,
         );
         let custom = TempDir::new().unwrap();
@@ -326,7 +365,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         write_file(
             root.path(),
-            "repos.json",
+            "tilt-devenv.json",
             r#"[{"name":"foo","url":"u","group":"g"}]"#,
         );
         // Point foo at a real repo (its base/main checkout, via an override).
@@ -370,7 +409,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         write_file(
             root.path(),
-            "repos.json",
+            "tilt-devenv.json",
             r#"[{"name":"foo","url":"u","group":"g"}]"#,
         );
         let ws = TempDir::new().unwrap();
@@ -385,11 +424,47 @@ mod tests {
     }
 
     #[test]
+    fn repos_json_object_form_sets_workspace_base() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"workspace":"projects","repos":[{"name":"foo","url":"u","group":"g"}]}"#,
+        );
+
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(reg.resolve()[0].path, root.path().join("projects/foo"));
+    }
+
+    #[test]
+    fn tilt_config_workspace_overrides_repos_json_workspace() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"workspace":"projects","repos":[{"name":"foo","url":"u","group":"g"}]}"#,
+        );
+        let ws = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt_config.json",
+            &format!(r#"{{"workspace":{}}}"#, quote(ws.path())),
+        );
+
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(
+            reg.resolve()[0].path,
+            ws.path().join("foo"),
+            "tilt_config wins"
+        );
+    }
+
+    #[test]
     fn present_detects_git_dir() {
         let root = TempDir::new().unwrap();
         write_file(
             root.path(),
-            "repos.json",
+            "tilt-devenv.json",
             r#"[{"name":"foo","url":"u","group":"g"}]"#,
         );
         std::fs::create_dir_all(root.path().join("foo/.git")).unwrap();
@@ -402,7 +477,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert!(
             Registry::load_from(dir.path()).is_err(),
-            "expected error when repos.json is absent"
+            "expected error when tilt-devenv.json is absent"
         );
     }
 
@@ -411,7 +486,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         write_file(
             root.path(),
-            "repos.json",
+            "tilt-devenv.json",
             r#"[{"name":"foo","url":"u","group":"g"}]"#,
         );
         write_file(root.path(), "tilt_config.json", "{ this is not valid json");
