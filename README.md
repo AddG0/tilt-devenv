@@ -9,7 +9,7 @@ Two pieces: a Rust tool (`repos` CLI + `repos-tiltd` daemon) and a Tilt extensio
 **1. Put the binaries on PATH.** Flake package (ships `repos` + `repos-tiltd`):
 
 ```nix
-inputs.repos.url = "git+https://.../tilt-devenv";
+inputs.repos.url = "github:AddG0/tilt-devenv";
 devShells.default = pkgs.mkShell {
   packages = [ inputs.repos.packages.${system}.default ];
 };
@@ -31,7 +31,7 @@ Path resolution: `tilt_config.json` override > `ghq` checkout > sibling dir. See
 **3. Load the extension** in your Tiltfile:
 
 ```python
-v1alpha1.extension_repo(name='repos', url='https://.../tilt-devenv')
+v1alpha1.extension_repo(name='repos', url='https://github.com/AddG0/tilt-devenv')
 v1alpha1.extension(name='repos', repo_name='repos', repo_path='tilt')
 load('ext://repos', 'repos_load', 'repos_status_ui', 'repos_link')
 
