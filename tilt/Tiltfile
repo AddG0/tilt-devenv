@@ -1,0 +1,126 @@
+# repos — Tilt extension
+#
+# Reusable Tilt glue for the `repos` multi-repo branch tool. Load it from a
+# project Tiltfile:
+#
+#     v1alpha1.extension_repo(name='repos', url='https://…/tilt-devenv')
+#     v1alpha1.extension(name='repos', repo_name='repos', repo_path='tilt')
+#     load('ext://repos', 'repos_load', 'repos_status_ui', 'repos_browse_url', 'repos_link')
+#
+#     repos = repos_load()
+#     repos_status_ui({'my-service': 'my-service-repo'}, repos)
+#
+# Requires the `repos` and `repos-tiltd` binaries on PATH (ship them via the
+# tool's Nix flake, or `cargo install --path crates/repos --path crates/repos-tiltd`).
+#
+# `repos_load` and `repos_status_ui`'s `git-status` resource shell out to
+# `repos`, which finds its registry by walking up from the working directory for
+# `repos.json` — so the loading Tiltfile must sit at (or under) the dev-env root
+# that holds `repos.json`.
+
+def repos_load(clone_missing=True):
+    """Resolve every repo via `repos list --json` and return a dict keyed by
+    name. Each value is a struct(name, url, group, path, present). When
+    `clone_missing` is set, repos not yet on disk are cloned first.
+
+    A dict has no order; if the caller needs the registry order (the order of
+    `repos.json`), iterate `repos_resolve()` instead."""
+    return {r.name: r for r in repos_resolve(clone_missing=clone_missing)}
+
+def repos_resolve(clone_missing=True):
+    """Like `repos_load`, but returns a list in registry order (the order of
+    `repos.json`)."""
+    # Reload the Tiltfile when the active worktree selection changes, so picking
+    # a worktree on a resource re-resolves its path and restarts it.
+    watch_file(str(local('repos worktree state-path', quiet=True, echo_off=True)).strip())
+    resolved = decode_json(str(local(
+        'repos list --json',
+        quiet=True,
+        echo_off=True,
+    )))
+    return [_make_repo(r, clone_missing) for r in resolved]
+
+def _make_repo(r, clone_missing):
+    path = r['path']
+    if clone_missing and not os.path.exists(path):
+        local('git clone %s %s' % (r['url'], path))
+    return struct(
+        name=r['name'],
+        url=r['url'],
+        group=r['group'],
+        path=path,
+        present=os.path.exists(os.path.join(path, '.git')),
+    )
+
+def repos_browse_url(remote):
+    """Turn a git remote — scp-SSH (`git@host:path`), `ssh://host/path`, or
+    `https://host/path` — into a browsable `https://host/path` URL. The host is
+    preserved, so this works for gitlab.com, github.com, and self-hosted alike."""
+    if remote.startswith('ssh://'):
+        rest = remote[len('ssh://'):]           # [user@]host[:port]/path
+        parts = rest.split('/', 1)
+        host = parts[0].split('@')[-1].split(':')[0]
+        path = parts[1] if len(parts) > 1 else ''
+    elif '://' in remote:                        # https:// or http://
+        rest = remote.split('://', 1)[1]
+        parts = rest.split('/', 1)
+        host = parts[0].split('@')[-1]
+        path = parts[1] if len(parts) > 1 else ''
+    else:                                         # scp-like: [user@]host:path
+        userhost, path = remote.split(':', 1)
+        host = userhost.split('@')[-1]
+    if path.endswith('.git'):
+        path = path[:-len('.git')]
+    return 'https://%s/%s' % (host, path)
+
+def repos_link(remote, label='Repo'):
+    """A Tilt `link` to the browsable page for a git `remote` (see
+    `repos_browse_url`). Pass e.g. `repos_link(repos['foo'].url)`."""
+    return link(repos_browse_url(remote), label)
+
+def repos_status_ui(
+        branch_resources,
+        repos,
+        status_links=[],
+        poll='5m',
+        rust_log='repos_tiltd=info,repos_core=info',
+        labels=None):
+    """Wire up the live cross-repo UI, two coupled resources:
+
+      * `repos-branches` — a long-lived `repos-tiltd` daemon that puts a live
+        branch picker + pull button on each mapped resource and a global
+        checkout-all button, handling clicks in-process.
+      * `git-status` — a one-shot `repos status` table pane the daemon retriggers
+        whenever a repo's HEAD/index changes.
+
+    `branch_resources` maps a Tilt resource name -> the repo name (key in
+    `repos`) whose branch it shows; they differ when a repo backs a
+    differently-named resource. `status_links` are extra `link()`s to attach to
+    the status pane (e.g. the dev-env repo's own remote). `poll` is how often the
+    daemon fetches remotes to refresh ahead/behind."""
+    spec = [
+        {'resource': res, 'repo': repo, 'path': repos[repo].path}
+        for res, repo in branch_resources.items()
+    ]
+    local_resource(
+        'repos-branches',
+        serve_cmd='repos-tiltd --poll %s' % poll,
+        serve_env={
+            'REPOS_TILT_SPEC': encode_json(spec),
+            'RUST_LOG': rust_log,
+        },
+        allow_parallel=True,
+        labels=labels if labels else [],
+    )
+    # Tilt ignores .git, so the daemon watches it and runs `tilt trigger
+    # git-status` to reprint. The resource name MUST stay `git-status` — the
+    # daemon triggers it by that name.
+    local_resource(
+        'git-status',
+        cmd='repos status',
+        trigger_mode=TRIGGER_MODE_MANUAL,
+        auto_init=True,
+        allow_parallel=True,
+        links=status_links,
+        labels=labels if labels else [],
+    )

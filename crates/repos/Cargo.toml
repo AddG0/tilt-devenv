@@ -1,0 +1,29 @@
+[package]
+name = "repos"
+version.workspace = true
+edition.workspace = true
+
+# The `repos` binary: the user-facing CLI, a thin frontend over repos-core. The
+# subcommands and terminal rendering live here; the reusable domain + infra live
+# in repos-core, and the live Tilt daemon is the separate `repos-tiltd` crate.
+
+[[bin]]
+name = "repos"
+path = "src/main.rs"
+
+[dependencies]
+repos-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+tracing-subscriber.workspace = true
+comfy-table.workspace = true
+owo-colors.workspace = true
+
+[dev-dependencies]
+repos-core = { workspace = true, features = ["testing"] }
+assert_cmd.workspace = true
+predicates.workspace = true
