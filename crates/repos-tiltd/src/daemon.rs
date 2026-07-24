@@ -35,9 +35,10 @@ struct WatchSpec {
     path: PathBuf,
 }
 
-/// Whether a `.git` filesystem event warrants a refresh: a real change to HEAD
-/// or index (branch switch / commit / stage) or to worktree metadata under
-/// `worktrees/` (a worktree added or removed).
+/// Whether a `.git` filesystem event warrants a refresh: a change to HEAD or
+/// index at the main checkout (branch switch / commit / stage), a worktree's
+/// HEAD (a branch switch inside it), or a worktree added/removed under
+/// `worktrees/`.
 ///
 /// notify's inotify mask includes `IN_OPEN`, so the `git status` each refresh
 /// runs re-arrives as an `Access(Open)` event on those same files — treating
@@ -52,11 +53,11 @@ fn is_relevant_change(kind: &EventKind, path: &Path) -> bool {
     ) {
         return false;
     }
-    // Inside a worktree's own metadata dir, only its addition/removal matters —
-    // not churn to its files (its `index`, which `git status` rewrites, would
-    // otherwise spin the watch).
+    // Ignore the worktree's `index` (git status churns it → refresh spin), but
+    // react to its HEAD — a branch switch, which git status never writes.
     if is_under_worktrees(path) {
-        return is_worktree_entry(path);
+        return is_worktree_entry(path)
+            || path.file_name().and_then(|n| n.to_str()) == Some("HEAD");
     }
     path.file_name()
         .and_then(|n| n.to_str())
@@ -475,13 +476,20 @@ mod tests {
         // `git status` in a linked worktree rewrites its own
         // `.git/worktrees/<id>/index`. Treating that as a change spins the watch
         // (refresh -> git status -> index write -> refresh ...), which pegs the
-        // git-status resource. Only worktree add/remove (dir-level) is relevant.
+        // git-status resource.
         let modify = EventKind::Modify(ModifyKind::Data(DataChange::Any));
         assert!(!is_relevant_change(
             &modify,
             &git_path("worktrees").join("feat-login").join("index")
         ));
-        assert!(!is_relevant_change(
+    }
+
+    #[test]
+    fn should_refresh_on_branch_switch_inside_a_worktree() {
+        // A branch switch in a linked worktree rewrites its HEAD — the buttons
+        // must reflect it (its `index`, churned by `git status`, stays ignored).
+        let modify = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        assert!(is_relevant_change(
             &modify,
             &git_path("worktrees").join("feat-login").join("HEAD")
         ));
