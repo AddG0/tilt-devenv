@@ -6,11 +6,11 @@ use std::process::Command as StdCommand;
 use assert_cmd::Command;
 use tempfile::TempDir;
 
-/// A REPOS_ROOT with a `repos.json` fixture; `REPOS_ROOT` short-circuits the
+/// A REPOS_ROOT with a `tilt-devenv.json` fixture; `REPOS_ROOT` short-circuits the
 /// upward search so the test never picks up the real registry.
 fn fixture(repos_json: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("repos.json"), repos_json).unwrap();
+    std::fs::write(dir.path().join("tilt-devenv.json"), repos_json).unwrap();
     dir
 }
 
@@ -87,7 +87,7 @@ fn missing_registry_fails_with_a_clear_error() {
         .arg("list")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("repos.json"));
+        .stderr(predicates::str::contains("tilt-devenv.json"));
 }
 
 #[test]

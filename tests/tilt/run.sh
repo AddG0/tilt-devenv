@@ -40,7 +40,7 @@ for name in alpha beta; do
   rm -rf "$seed"
 done
 
-cat > "$WORK/repos.json" <<EOF
+cat > "$WORK/tilt-devenv.json" <<EOF
 [
   {"name": "alpha", "url": "file://$WORK/.bare/alpha.git", "group": "demo"},
   {"name": "beta",  "url": "file://$WORK/.bare/beta.git",  "group": "demo"}
@@ -48,7 +48,7 @@ cat > "$WORK/repos.json" <<EOF
 EOF
 
 # repos resolves its registry from REPOS_ROOT (and clones missing repos beside
-# repos.json), so everything lands inside the temp workspace.
+# tilt-devenv.json), so everything lands inside the temp workspace.
 export REPOS_ROOT="$WORK"
 
 result="$WORK/result.json"

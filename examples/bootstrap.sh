@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create throwaway local git repos and a repos.json pointing at them, so the
+# Create throwaway local git repos and a tilt-devenv.json pointing at them, so the
 # example can be driven with `tilt up` fully offline — no SSH keys, no network.
 # `alpha` also gets a git worktree so its resource shows the 🌳 worktree picker.
 # Everything it writes is gitignored. Re-run any time to reset the demo.
@@ -28,7 +28,7 @@ make_repo() {
 make_repo alpha
 make_repo beta
 
-cat > "$HERE/repos.json" <<EOF
+cat > "$HERE/tilt-devenv.json" <<EOF
 [
   {"name": "alpha", "url": "file://$DEMO/alpha.git", "group": "demo"},
   {"name": "beta",  "url": "file://$DEMO/beta.git",  "group": "demo"}
@@ -41,7 +41,7 @@ EOF
 git clone -q "file://$DEMO/alpha.git" "$HERE/alpha"
 git -C "$HERE/alpha" worktree add -q -b demo-feature "$DEMO/wt/alpha-demo-feature"
 
-echo "Wrote $HERE/repos.json and added a git worktree (demo-feature) to alpha."
+echo "Wrote $HERE/tilt-devenv.json and added a git worktree (demo-feature) to alpha."
 echo "Now run:  tilt up   (from $HERE)"
 echo "The 'alpha' resource has a 🌳 worktree picker; choosing demo-feature reloads"
 echo "and restarts it at the worktree path."

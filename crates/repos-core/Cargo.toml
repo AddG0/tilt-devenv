@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 # Reusable core shared across dev-environment tools: git CLI primitives, the
-# repos.json registry + path resolution, the `devenv` domain (Project aggregate +
+# tilt-devenv.json registry + path resolution, the `devenv` domain (Project aggregate +
 # Workspace + Presenter port), and the low-level Tilt client. The `repos` CLI and
 # the `repos-tiltd` daemon are thin frontends over this.
 

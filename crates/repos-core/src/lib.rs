@@ -2,7 +2,7 @@
 //!
 //! - [`git`] — thin git-CLI wrappers for the operations we need (status,
 //!   checkout, and listing a repo's worktrees).
-//! - [`registry`] — parses `repos.json` and resolves each repo to its on-disk
+//! - [`registry`] — parses `tilt-devenv.json` and resolves each repo to its on-disk
 //!   path, mirroring the Tiltfile's resolution rules.
 //! - [`worktree`] — the developer's active per-repo worktree selection (XDG
 //!   state), the top-priority input to path resolution.

@@ -13,7 +13,7 @@ use repos_core::registry::Registry;
     name = "repos",
     about = "Cross-repo git branch management for a multi-repo dev environment",
     long_about = "repos manages git branches across every repo in the dev environment at once.\n\n\
-                  Repos are listed in repos.json at the root of the dev environment.",
+                  Repos are listed in tilt-devenv.json at the root of the dev environment.",
     version
 )]
 pub struct Cli {
