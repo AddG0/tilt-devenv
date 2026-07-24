@@ -1,0 +1,34 @@
+# Demo of the `repos` Tilt extension, runnable in isolation.
+#
+#   ./bootstrap.sh    # create local demo repos + repos.json (offline)
+#   tilt up           # from inside `nix develop` (provides `repos` + `tilt`)
+#
+# This demo is local-only (no Kubernetes); allow whatever kube context is
+# active so Tilt's production-context guard doesn't block the local() calls.
+allow_k8s_contexts(k8s_context())
+
+# Real consumers load the extension via ext:// (see the top-level README). Here
+# we load it by relative path so the example tracks the extension source
+# directly with no clone/cache step.
+load('../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_link')
+
+repos = repos_load()
+
+# Resource name == repo name here, so the mapping is identity.
+repos_status_ui(
+    {name: name for name in repos},
+    repos,
+    labels=['repos'],
+)
+
+# A stand-in "service" per repo, just so the branch buttons have a resource to
+# attach to.
+for name in repos:
+    r = repos[name]
+    local_resource(
+        name,
+        cmd='echo "%s @ %s" && git -C %s branch --show-current' % (name, r.path, r.path),
+        links=[repos_link(r.url, 'Remote')],
+        labels=['demo'],
+        allow_parallel=True,
+    )

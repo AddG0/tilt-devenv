@@ -1,0 +1,25 @@
+[package]
+name = "repos-tiltd"
+version.workspace = true
+edition.workspace = true
+
+# The `repos-tiltd` binary: the live Tilt daemon. The Tiltfile runs it as a
+# long-lived serve_cmd. It renders the repos-specific buttons (the `buttons`
+# Presenter adapter) via the shared Tilt client in repos-core and watches each
+# repo's `.git` to refresh on branch/worktree changes.
+
+[[bin]]
+name = "repos-tiltd"
+path = "src/main.rs"
+
+[dependencies]
+repos-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+humantime.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+notify.workspace = true

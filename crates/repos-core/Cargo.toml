@@ -1,0 +1,29 @@
+[package]
+name = "repos-core"
+version.workspace = true
+edition.workspace = true
+
+# Reusable core shared across dev-environment tools: git CLI primitives, the
+# repos.json registry + path resolution, the `devenv` domain (Project aggregate +
+# Workspace + Presenter port), and the low-level Tilt client. The `repos` CLI and
+# the `repos-tiltd` daemon are thin frontends over this.
+
+[features]
+# Exposes the `gittest` helper to other crates (the `repos` bin enables this in
+# its dev-dependencies). repos-core's own tests get it via cfg(test).
+testing = ["dep:tempfile"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+# Only the mpsc channel the Tilt click stream delivers on — no runtime — so a
+# consumer using core without Tilt still gets a lean tokio.
+tokio = { version = "1", features = ["sync"] }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

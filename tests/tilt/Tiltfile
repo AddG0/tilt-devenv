@@ -1,0 +1,55 @@
+# Automated test fixture for the `repos` Tilt extension.
+#
+# Driven by tests/tilt/run.sh, which points REPOS_ROOT at a temp workspace of
+# throwaway repos and execs `tilt alpha tiltfile-result` against this file. Any
+# `fail()` below aborts the Tiltfile, which the harness sees as a non-zero exit
+# / populated `.Error`; the harness additionally asserts the resource set.
+#
+# The extension is loaded by relative path (../../tilt/Tiltfile from here), so
+# this fixture exercises the real source with no clone/cache step.
+
+# Local-only; allow whatever kube context is active (none, in the sandbox).
+allow_k8s_contexts(k8s_context())
+
+load('../../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_browse_url', 'repos_link')
+
+# Unit assertions for repos_browse_url (pure remote -> browsable URL parser).
+def _eq(got, want, msg):
+    if got != want:
+        fail('repos_browse_url %s: got %r, want %r' % (msg, got, want))
+
+_eq(repos_browse_url('git@gitlab.com:acme/foo.git'),
+    'https://gitlab.com/acme/foo', 'scp-ssh')
+_eq(repos_browse_url('git@github.com:acme/group/foo.git'),
+    'https://github.com/acme/group/foo', 'scp-ssh nested path')
+_eq(repos_browse_url('gitlab.com:acme/foo.git'),
+    'https://gitlab.com/acme/foo', 'scp-ssh no user')
+_eq(repos_browse_url('ssh://git@gitlab.com/acme/foo.git'),
+    'https://gitlab.com/acme/foo', 'ssh://')
+_eq(repos_browse_url('ssh://git@host.example.com:2222/acme/foo.git'),
+    'https://host.example.com/acme/foo', 'ssh:// with port')
+_eq(repos_browse_url('https://gitlab.com/acme/foo.git'),
+    'https://gitlab.com/acme/foo', 'https with .git')
+_eq(repos_browse_url('https://gitlab.com/acme/foo'),
+    'https://gitlab.com/acme/foo', 'https without .git')
+_eq(repos_browse_url('https://user@github.com/acme/foo.git'),
+    'https://github.com/acme/foo', 'https with userinfo')
+
+_l = repos_link('git@gitlab.com:acme/foo.git', 'Src')
+_eq(_l.url, 'https://gitlab.com/acme/foo', 'repos_link url')
+
+# Integration: resolve the registry, clone missing repos, wire the live UI.
+repos = repos_load()
+
+# The registry the harness writes has exactly these two repos.
+if sorted(repos.keys()) != ['alpha', 'beta']:
+    fail('repos_load returned %r, want [alpha, beta]' % sorted(repos.keys()))
+
+for name in repos:
+    r = repos[name]
+    if not r.present:
+        fail('%s: expected present=True after repos_load(clone_missing)' % name)
+    local_resource(name, cmd='true', labels=['svc'], allow_parallel=True)
+
+# The status UI must create exactly the repos-branches daemon + git-status table.
+repos_status_ui({name: name for name in repos}, repos, labels=['repos'])
