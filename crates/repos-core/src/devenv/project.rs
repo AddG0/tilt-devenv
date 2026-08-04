@@ -12,7 +12,7 @@ const NIGHTLY: &str = "nightly";
 
 /// The aggregate root: one repo checkout. It owns its current state, the
 /// operations on it, and its own concurrency — every state read/write goes
-/// through its mutex, so the daemon's tasks (fs-watch, poll, clicks) need no
+/// through its mutex, so the daemon's tasks (fs-watch, clicks) need no
 /// external locking.
 pub struct Project {
     cfg: Config,
@@ -58,7 +58,7 @@ impl Project {
 
     /// Recomputes state from git, caches it, renders it, and returns it. After
     /// [`retire`](Self::retire) it still updates cached state but no longer
-    /// renders, so a late refresh (a queued fs-watch/poll) can't recreate the
+    /// renders, so a late refresh (a queued fs-watch) can't recreate the
     /// presentation post-teardown.
     pub fn refresh(&self) -> Snapshot {
         let snap = self.compute();

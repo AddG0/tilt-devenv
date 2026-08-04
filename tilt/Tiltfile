@@ -82,8 +82,9 @@ def repos_status_ui(
         branch_resources,
         repos,
         status_links=[],
-        poll='5m',
         rust_log='repos_tiltd=info,repos_core=info',
+        serve_cmd='repos-tiltd',
+        deps=[],
         labels=None):
     """Wire up the live cross-repo UI, two coupled resources:
 
@@ -96,19 +97,23 @@ def repos_status_ui(
     `branch_resources` maps a Tilt resource name -> the repo name (key in
     `repos`) whose branch it shows; they differ when a repo backs a
     differently-named resource. `status_links` are extra `link()`s to attach to
-    the status pane (e.g. the dev-env repo's own remote). `poll` is how often the
-    daemon fetches remotes to refresh ahead/behind."""
+    the status pane (e.g. the dev-env repo's own remote). `serve_cmd` and `deps`
+    default to the packaged binary; pass `serve_cmd='cargo run -p repos-tiltd'`
+    and `deps=['<repo>/crates']` to run the daemon from source instead, rebuilt
+    on every restart Tilt triggers from a `deps` change (see `examples/Tiltfile`'s
+    `dev` flag)."""
     spec = [
         {'resource': res, 'repo': repo, 'path': repos[repo].path}
         for res, repo in branch_resources.items()
     ]
     local_resource(
         'repos-branches',
-        serve_cmd='repos-tiltd --poll %s' % poll,
+        serve_cmd=serve_cmd,
         serve_env={
             'REPOS_TILT_SPEC': encode_json(spec),
             'RUST_LOG': rust_log,
         },
+        deps=deps,
         allow_parallel=True,
         labels=labels if labels else [],
     )

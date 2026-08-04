@@ -163,6 +163,7 @@
             git
             rust-analyzer
             cargo-watch
+            just
             # For exercising the Tilt extension against examples/.
             tilt
             lnav

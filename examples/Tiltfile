@@ -2,6 +2,9 @@
 #
 #   ./bootstrap.sh    # create local demo repos + tilt-devenv.json (offline)
 #   tilt up           # from inside `nix develop` (provides `repos` + `tilt`)
+#   just dev          # same, but repos-branches runs `cargo run -p repos-tiltd`
+#                      # from source (rebuilt + restarted on crate changes)
+#                      # instead of the Nix-packaged binary
 #
 # This demo is local-only (no Kubernetes); allow whatever kube context is
 # active so Tilt's production-context guard doesn't block the local() calls.
@@ -12,6 +15,10 @@ allow_k8s_contexts(k8s_context())
 # directly with no clone/cache step.
 load('../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_link')
 
+config.define_bool('dev', usage='Run repos-tiltd via `cargo run` from source, rebuilding and restarting on crate changes.')
+dev = config.parse().get('dev', False)
+root = os.path.abspath('..')
+
 repos = repos_load()
 
 # Resource name == repo name here, so the mapping is identity.
@@ -19,6 +26,8 @@ repos_status_ui(
     {name: name for name in repos},
     repos,
     labels=['repos'],
+    serve_cmd='cargo run --manifest-path %s/Cargo.toml -p repos-tiltd' % root if dev else 'repos-tiltd',
+    deps=['%s/crates' % root] if dev else [],
 )
 
 # A stand-in "service" per repo, just so the branch buttons have a resource to

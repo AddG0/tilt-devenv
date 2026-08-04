@@ -13,7 +13,6 @@ mod daemon;
 mod debounce;
 
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::Parser;
 
@@ -23,17 +22,13 @@ use clap::Parser;
     about = "Live Tilt daemon for the repos dev environment",
     version
 )]
-struct Cli {
-    /// How often to fetch remotes and refresh ahead/behind counts
-    #[arg(long, default_value = "5m", value_parser = humantime::parse_duration)]
-    poll: Duration,
-}
+struct Cli {}
 
 fn main() -> ExitCode {
     init_tracing();
 
-    let cli = Cli::parse();
-    match daemon::run(cli.poll) {
+    let _cli = Cli::parse();
+    match daemon::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("repos-tiltd: {e:#}");
