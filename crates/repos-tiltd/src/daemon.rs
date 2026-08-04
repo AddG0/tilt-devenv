@@ -5,14 +5,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::time::MissedTickBehavior;
 
 use repos_core::devenv::{CheckoutTarget, Config, Outcome, Project, Workspace, count_with_outcome};
 use repos_core::tilt::{self as client, Click};
@@ -81,7 +79,7 @@ fn is_worktree_entry(path: &Path) -> bool {
     name_is_worktrees || parent_is_worktrees
 }
 
-pub fn run(poll: Duration) -> Result<()> {
+pub fn run() -> Result<()> {
     let spec = std::env::var("REPOS_TILT_SPEC")
         .map_err(|_| anyhow!("REPOS_TILT_SPEC is not set (the Tiltfile passes it)"))?;
     let specs: Vec<WatchSpec> = serde_json::from_str(&spec).context("parsing REPOS_TILT_SPEC")?;
@@ -98,10 +96,10 @@ pub fn run(poll: Duration) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(run_daemon(cfgs, poll))
+    rt.block_on(run_daemon(cfgs))
 }
 
-async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
+async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
     let ws = Arc::new(Workspace::with_presenter(cfgs, |c| {
         Box::new(buttons::Presenter::new(&c.resource, c.path.clone()))
     }));
@@ -157,21 +155,12 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 
-    let mut ticker = tokio::time::interval(poll);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    ticker.tick().await; // consume the immediate first tick (poll after `poll`, not now)
-
     let debouncer = Debouncer::new(Duration::from_millis(300));
-    let polling = Arc::new(AtomicBool::new(false));
     // Dev-env root, for reverting a repo to its main checkout when its selected
     // worktree is removed (best-effort — no reconciliation if it can't be found).
     let root = registry::find_root().ok();
 
-    tracing::info!(
-        repos = ws.projects().len(),
-        ?poll,
-        "watching for branch changes"
-    );
+    tracing::info!(repos = ws.projects().len(), "watching for branch changes");
 
     loop {
         tokio::select! {
@@ -220,8 +209,6 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
             }
 
             Some(click) = click_rx.recv() => handle_click(&ws, click),
-
-            _ = ticker.tick() => poll_remotes(ws.clone(), polling.clone()),
         }
     }
 
@@ -398,24 +385,6 @@ fn checkout_all(ws: &Workspace, branch: &str) {
         errored = n(Outcome::Errored),
         "checkout-all",
     );
-}
-
-/// Fetches + refreshes every project so ahead/behind stays current, then
-/// refreshes the status table. Guarded so a slow poll can't overlap the next
-/// tick.
-fn poll_remotes(ws: Arc<Workspace>, polling: Arc<AtomicBool>) {
-    if polling
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-    tracing::debug!("polling remotes");
-    tokio::task::spawn_blocking(move || {
-        ws.status_all(true);
-        trigger_status();
-        polling.store(false, Ordering::SeqCst);
-    });
 }
 
 #[cfg(test)]

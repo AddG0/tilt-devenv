@@ -47,16 +47,16 @@ Local plugin dev: point `extension_repo` at `url='file:///abs/path/to/tilt-deven
 | --- | --- |
 | `repos_load(clone_missing=True)` | Resolve registry → `{name: struct(name, url, group, path, present)}`. |
 | `repos_resolve(clone_missing=True)` | Same, as a list in `tilt-devenv.json` order. |
-| `repos_status_ui(branch_resources, repos, status_links=[], poll='5m', rust_log=…, labels=None)` | `repos-branches` daemon + `git-status` table. |
+| `repos_status_ui(branch_resources, repos, status_links=[], rust_log=…, serve_cmd='repos-tiltd', deps=[], labels=None)` | `repos-branches` daemon + `git-status` table. |
 | `repos_browse_url(remote)` | git remote (scp/ssh/https) → browsable `https://host/path`. |
 | `repos_link(remote, label='Repo')` | Tilt `link` to that URL. |
 
 ## Demo
 
 ```bash
-nix develop && cd examples
-./bootstrap.sh   # throwaway local repos + tilt-devenv.json, offline
-tilt up
+nix develop
+just demo   # examples/bootstrap.sh (throwaway local repos + tilt-devenv.json, offline) + tilt up
+just dev    # same, but repos-tiltd runs `cargo run` from source instead of the Nix-packaged binary
 ```
 
 ## Develop
