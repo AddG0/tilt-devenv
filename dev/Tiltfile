@@ -13,6 +13,7 @@ allow_k8s_contexts(k8s_context())
 
 load('../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_link',
      'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled')
+load('ext://uibutton', 'cmd_button')
 
 _root = os.path.abspath('..')
 
@@ -27,8 +28,25 @@ repos_status_ui(
     repos,
     labels=['repos'],
     serve_cmd='cargo run --manifest-path %s/Cargo.toml -p repos-tiltd' % _root,
+    status_serve_cmd='cargo run --manifest-path %s/Cargo.toml -p repos -- status --watch' % _root,
     deps=['%s/crates' % _root],
 )
+
+# A button on the git-status pane for testing: toggles alpha between main and
+# feature-x so you can see the live status table pick up a real git change
+# (a branch switch, computed purely locally, needs no fetch).
+if 'alpha' in repos:
+    cmd_button(
+        'repos-status-test-trigger',
+        argv=['sh', '-c', '''
+            cd "$1"
+            current=$(git rev-parse --abbrev-ref HEAD)
+            git checkout "$([ "$current" = main ] && echo feature-x || echo main)"
+        ''', '--', repos['alpha'].path],
+        resource='git-status',
+        icon_name='call_split',
+        text='toggle alpha branch (test)',
+    )
 
 # A stand-in "service" per enabled repo, just so the branch buttons have a
 # resource to attach to.

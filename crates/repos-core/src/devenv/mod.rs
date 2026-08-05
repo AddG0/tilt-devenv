@@ -29,7 +29,7 @@ pub struct Config {
 
 /// The current information about a project — a value object copied out from
 /// under the aggregate's lock.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
     pub name: String,
     pub group: String,

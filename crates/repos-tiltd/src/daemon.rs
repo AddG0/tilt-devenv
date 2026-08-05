@@ -1,17 +1,22 @@
 //! The daemon's core loop, run by the Tiltfile as a long-lived serve_cmd. It
 //! maintains the live Tilt buttons — per-repo branch/pull plus the nav
-//! checkout-all — handles their clicks in-process, and triggers the `git-status`
-//! resource to reprint its status table whenever a repo's git state changes.
+//! checkout-all — handles their clicks in-process, and periodically fetches
+//! remotes so ahead/behind counts stay current. It's the *only* thing that
+//! fetches: the `git-status` resource is a self-refreshing `repos status
+//! --watch` pane that only re-reads local state, so the two never race each
+//! other's fetches.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::time::MissedTickBehavior;
 
 use repos_core::devenv::{CheckoutTarget, Config, Outcome, Project, Workspace, count_with_outcome};
 use repos_core::registry::Registry;
@@ -21,18 +26,15 @@ use repos_core::{git, worktree};
 use crate::buttons;
 use crate::debounce::Debouncer;
 
-/// The Tiltfile resource that runs `repos status`; the daemon triggers it to
-/// refresh the consolidated status table. Its `.git`-watching can't live in Tilt
-/// (Tilt ignores `.git`), so the daemon detects changes and triggers it here.
-const STATUS_RESOURCE: &str = "git-status";
-
-/// One entry of `REPOS_TILT_SPEC`: the Tilt resource, the repo it shows, and
-/// that repo's on-disk path.
+/// One entry of `REPOS_TILT_SPEC`: the Tilt resource, the repo it shows, that
+/// repo's on-disk path, and its registry group (checkout-all's group filter).
 #[derive(Deserialize)]
 struct WatchSpec {
     resource: String,
     repo: String,
     path: PathBuf,
+    #[serde(default)]
+    group: String,
 }
 
 /// Whether a `.git` filesystem event warrants a refresh: a change to HEAD or
@@ -81,7 +83,7 @@ fn is_worktree_entry(path: &Path) -> bool {
     name_is_worktrees || parent_is_worktrees
 }
 
-pub fn run() -> Result<()> {
+pub fn run(poll: Duration) -> Result<()> {
     let spec = std::env::var("REPOS_TILT_SPEC")
         .map_err(|_| anyhow!("REPOS_TILT_SPEC is not set (the Tiltfile passes it)"))?;
     let specs: Vec<WatchSpec> = serde_json::from_str(&spec).context("parsing REPOS_TILT_SPEC")?;
@@ -89,7 +91,7 @@ pub fn run() -> Result<()> {
         .into_iter()
         .map(|s| Config {
             name: s.repo,
-            group: String::new(),
+            group: s.group,
             resource: s.resource,
             path: s.path,
         })
@@ -98,10 +100,10 @@ pub fn run() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(run_daemon(cfgs))
+    rt.block_on(run_daemon(cfgs, poll))
 }
 
-async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
+async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
     let ws = Arc::new(Workspace::with_presenter(cfgs, |c| {
         Box::new(buttons::Presenter::new(&c.resource, c.path.clone()))
     }));
@@ -148,7 +150,8 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
         .ok();
     let root = reg.as_ref().map(|r| r.root.clone());
     let profile_names: Vec<String> = reg
-        .map(|r| r.profiles.into_keys().collect())
+        .as_ref()
+        .map(|r| r.profiles.keys().cloned().collect())
         .unwrap_or_default();
     // The developer's persisted selection (XDG state, survives a `tilt up`
     // restart) — the profile button's checkbox defaults, and where a click
@@ -159,9 +162,29 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
         .zip(profile_state.as_deref())
         .map(|(root, state)| repos_core::profile::active(state, root))
         .unwrap_or_default();
+    // The active profiles' repo names, for checkout-all's "active profile only"
+    // checkbox.
+    let active_profile_repos: Vec<String> = reg
+        .as_ref()
+        .map(|r| r.resolve_only(&[], &active_profiles))
+        .unwrap_or_default();
 
-    render_global(&profile_names, &active_profiles);
-    trigger_status();
+    let mut groups: Vec<String> = ws
+        .projects()
+        .iter()
+        .map(|p| p.group().to_string())
+        .filter(|g| !g.is_empty())
+        .collect();
+    groups.sort();
+    groups.dedup();
+
+    render_global(&groups, &profile_names, &active_profiles);
+
+    let ctx = ClickContext {
+        root,
+        profile_state,
+        active_profile_repos,
+    };
 
     // Button clicks. If watching fails, keep serving status: the sender is held
     // alive so its receiver simply never fires.
@@ -177,12 +200,19 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 
+    let mut ticker = tokio::time::interval(poll);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    ticker.tick().await; // consume the immediate first tick (poll after `poll`, not now)
+
     let debouncer = Debouncer::new(Duration::from_millis(300));
+    let polling = Arc::new(AtomicBool::new(false));
 
     tracing::info!(
         repos = ws.projects().len(),
+        groups = ?groups,
         profiles = ?profile_names,
         active = ?active_profiles,
+        ?poll,
         "watching for branch changes"
     );
 
@@ -210,7 +240,7 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
                     if matches!(&ev.kind, EventKind::Remove(_))
                         && path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "worktrees")
                         && let Some(id) = path.file_name().and_then(|n| n.to_str())
-                        && let Some(root) = root.clone()
+                        && let Some(root) = ctx.root.clone()
                     {
                         let id = id.to_string();
                         debouncer.schedule(format!("__wt_revert_{id}"), move || {
@@ -226,13 +256,13 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
                         debouncer.schedule(p.resource().to_string(), move || {
                             p.refresh();
                         });
-                        // Coalesce any repos changing at once into one table refresh.
-                        debouncer.schedule(STATUS_RESOURCE.to_string(), trigger_status);
                     }
                 }
             }
 
-            Some(click) = click_rx.recv() => handle_click(&ws, click, root.clone(), profile_state.clone()),
+            Some(click) = click_rx.recv() => handle_click(&ws, click, &ctx),
+
+            _ = ticker.tick() => poll_remotes(ws.clone(), polling.clone()),
         }
     }
 
@@ -252,26 +282,35 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
     Ok(())
 }
 
-/// Dispatches a button press to the matching project's in-process operation, off
-/// the event loop (on the blocking pool) so a slow git op doesn't stall watching.
-/// `root`/`profile_state` are only needed for a profile-switcher click.
-fn handle_click(
-    ws: &Arc<Workspace>,
-    c: Click,
+/// Context a button click may need beyond the click itself and the workspace.
+struct ClickContext {
     root: Option<PathBuf>,
     profile_state: Option<PathBuf>,
-) {
+    /// The active profiles' repo names, for checkout-all's "active profile
+    /// only" checkbox.
+    active_profile_repos: Vec<String>,
+}
+
+/// Dispatches a button press to the matching project's in-process operation, off
+/// the event loop (on the blocking pool) so a slow git op doesn't stall watching.
+fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
     tracing::debug!(button = %c.button, "click");
 
     let branch = c.inputs.get("branch").cloned().unwrap_or_default();
     if buttons::is_checkout_all_click(&c.button) {
         let ws = ws.clone();
-        tokio::task::spawn_blocking(move || checkout_all(&ws, &branch));
+        let group: Vec<String> = buttons::checkout_all_group(&c.inputs).into_iter().collect();
+        let names = if buttons::checkout_all_profile_only(&c.inputs) {
+            ctx.active_profile_repos.clone()
+        } else {
+            Vec::new()
+        };
+        tokio::task::spawn_blocking(move || checkout_all(&ws, &branch, &names, &group));
         return;
     }
     if buttons::is_profile_click(&c.button) {
         let checked = checked_profiles(&c.inputs);
-        if let (Some(root), Some(state)) = (root, profile_state) {
+        if let (Some(root), Some(state)) = (ctx.root.clone(), ctx.profile_state.clone()) {
             tokio::task::spawn_blocking(move || switch_profile(&state, &root, &checked));
         } else {
             tracing::error!("no dev-env root or profile-state path; ignoring profile click");
@@ -297,7 +336,7 @@ fn handle_click(
     {
         let p = p.clone();
         let selected = c.inputs.get("worktree").cloned().unwrap_or_default();
-        let Some(root) = root else {
+        let Some(root) = ctx.root.clone() else {
             tracing::error!("no dev-env root; ignoring worktree click");
             return;
         };
@@ -383,11 +422,11 @@ fn revert_removed_worktree(root: &Path, id: &str) {
     }
 }
 
-/// Draws the nav checkout-all button (a static text box), plus the
-/// profile-switcher button when `profile_names` is non-empty — its checkboxes
-/// default to `active_profiles`, the persisted selection.
-fn render_global(profile_names: &[String], active_profiles: &[String]) {
-    if let Err(e) = buttons::render_checkout_all() {
+/// Draws the nav checkout-all button (offering `groups` in its dropdown), plus
+/// the profile-switcher button when `profile_names` is non-empty — its
+/// checkboxes default to `active_profiles`, the persisted selection.
+fn render_global(groups: &[String], profile_names: &[String], active_profiles: &[String]) {
+    if let Err(e) = buttons::render_checkout_all(groups) {
         tracing::error!(error = %e, "failed to render checkout-all button");
     }
     if !profile_names.is_empty()
@@ -418,16 +457,10 @@ fn switch_profile(state: &Path, root: &Path, checked: &[String]) {
     }
 }
 
-/// (Re)runs the `git-status` resource so its log pane reflects current state.
-fn trigger_status() {
-    if let Err(e) = client::trigger(STATUS_RESOURCE) {
-        tracing::warn!(error = %e, "failed to trigger git-status resource");
-    }
-}
-
-/// Switches every repo to `branch` (repos without it fall back to their default
-/// branch), reporting a tally.
-fn checkout_all(ws: &Workspace, branch: &str) {
+/// Switches every repo matching `names`/`groups` (either empty matches
+/// everything — the default) to `branch` (repos without it fall back to their
+/// default branch), reporting a tally.
+fn checkout_all(ws: &Workspace, branch: &str, names: &[String], groups: &[String]) {
     let target = match CheckoutTarget::parse(branch) {
         Ok(t) => t,
         Err(e) => {
@@ -435,7 +468,7 @@ fn checkout_all(ws: &Workspace, branch: &str) {
             return;
         }
     };
-    let results = ws.checkout_all(&target);
+    let results = ws.filter(names, groups).checkout_all(&target);
     for r in &results {
         if let Some(e) = &r.err {
             tracing::error!(repo = %r.name, error = %e, "checkout failed");
@@ -450,6 +483,25 @@ fn checkout_all(ws: &Workspace, branch: &str) {
         errored = n(Outcome::Errored),
         "checkout-all",
     );
+}
+
+/// Fetches + refreshes every project so ahead/behind stays current. Refreshing
+/// re-renders each project's own branch/pull buttons in place via its
+/// `Presenter` — it does *not* trigger the `git-status` pane, so a poll never
+/// interrupts what the developer is looking at there. Guarded so a slow poll
+/// can't overlap the next tick.
+fn poll_remotes(ws: Arc<Workspace>, polling: Arc<AtomicBool>) {
+    if polling
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    tracing::debug!("polling remotes");
+    tokio::task::spawn_blocking(move || {
+        ws.status_all(true);
+        polling.store(false, Ordering::SeqCst);
+    });
 }
 
 #[cfg(test)]

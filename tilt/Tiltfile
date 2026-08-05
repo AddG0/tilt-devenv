@@ -130,25 +130,31 @@ def repos_status_ui(
         status_links=[],
         rust_log='repos_tiltd=info,repos_core=info',
         serve_cmd='repos-tiltd',
+        status_serve_cmd='repos status --watch',
         deps=[],
         labels=None):
-    """Wire up the live cross-repo UI, two coupled resources:
+    """Wire up the live cross-repo UI, two independent long-lived resources:
 
-      * `repos-branches` — a long-lived `repos-tiltd` daemon that puts a live
-        branch picker + pull button on each mapped resource and a global
-        checkout-all button, handling clicks in-process.
-      * `git-status` — a one-shot `repos status` table pane the daemon retriggers
-        whenever a repo's HEAD/index changes.
+      * `repos-branches` — a `repos-tiltd` daemon that puts a live branch
+        picker + pull button on each mapped resource and a global checkout-all
+        button (optionally restricted to one group, or to the active
+        profile's repos), handling clicks in-process. It's the only one of
+        the two that fetches remotes, on a timer (`repos-tiltd --poll`).
+      * `git-status` — a self-refreshing `repos status --watch` table pane. It
+        never fetches on its own (so it can't race `repos-branches`'s fetch);
+        it just redraws from local git state on its own short interval.
 
     `branch_resources` maps a Tilt resource name -> the repo name (key in
     `repos`) whose branch it shows; they differ when a repo backs a
     differently-named resource. `status_links` are extra `link()`s to attach to
-    the status pane (e.g. the dev-env repo's own remote). `serve_cmd` and `deps`
-    default to the packaged binary; pass `serve_cmd='cargo run -p repos-tiltd'`
-    and `deps=['<repo>/crates']` to run the daemon from source instead, rebuilt
-    on every restart Tilt triggers from a `deps` change (see `dev/Tiltfile`)."""
+    the status pane (e.g. the dev-env repo's own remote). `serve_cmd`,
+    `status_serve_cmd`, and `deps` default to the packaged binaries; pass
+    `serve_cmd='cargo run -p repos-tiltd'`, `status_serve_cmd='cargo run -p
+    repos -- status --watch'`, and `deps=['<repo>/crates']` to run both from
+    source instead, rebuilt on every restart Tilt triggers from a `deps`
+    change (see `dev/Tiltfile`)."""
     spec = [
-        {'resource': res, 'repo': repo, 'path': repos[repo].path}
+        {'resource': res, 'repo': repo, 'path': repos[repo].path, 'group': repos[repo].group}
         for res, repo in branch_resources.items()
     ]
     local_resource(
@@ -162,14 +168,10 @@ def repos_status_ui(
         allow_parallel=True,
         labels=labels if labels else [],
     )
-    # Tilt ignores .git, so the daemon watches it and runs `tilt trigger
-    # git-status` to reprint. The resource name MUST stay `git-status` — the
-    # daemon triggers it by that name.
     local_resource(
         'git-status',
-        cmd='repos status',
-        trigger_mode=TRIGGER_MODE_MANUAL,
-        auto_init=True,
+        serve_cmd=status_serve_cmd,
+        deps=deps,
         allow_parallel=True,
         links=status_links,
         labels=labels if labels else [],

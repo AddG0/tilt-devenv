@@ -2,6 +2,7 @@
 //! picker and a pull button per repo, plus a global checkout-all. Built on the
 //! [`repos_core::tilt`] client seam, which does the actual apply/delete/watch.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -14,6 +15,8 @@ const PULL_PREFIX: &str = "repos-pull-";
 const WORKTREE_PREFIX: &str = "repos-worktree-";
 const CHECKOUT_ALL_BUTTON: &str = "repos-checkout-all";
 const PROFILE_BUTTON: &str = "repos-profile";
+/// Checkout-all's group dropdown sentinel meaning "every group" (no restriction).
+const ALL_GROUPS: &str = "(all groups)";
 
 fn branch_name(resource: &str) -> String {
     format!("{BRANCH_PREFIX}{resource}")
@@ -162,11 +165,14 @@ fn pull_caption(behind: i32) -> String {
     }
 }
 
-/// The global checkout-all button: type a branch and it's checked out across
-/// every repo (repos without it fall back to their default branch). A text box,
-/// not a dropdown, since the union of branches across all repos is far too long
-/// to pick from.
-fn checkout_all_button() -> UiButton {
+/// The global checkout-all button: type a branch, optionally restrict to one
+/// `group` (dropdown, defaulting to every group) or check "active profile only"
+/// to restrict to the currently active profile's repos instead — by default
+/// (nothing picked, box unchecked) it checks out every repo, unaffected by the
+/// active profile.
+fn checkout_all_button(groups: &[String]) -> UiButton {
+    let mut group_choices = vec![ALL_GROUPS.to_string()];
+    group_choices.extend(groups.iter().cloned());
     UiButton::new(
         CHECKOUT_ALL_BUTTON.to_string(),
         "⎇ checkout all repos".to_string(),
@@ -178,11 +184,27 @@ fn checkout_all_button() -> UiButton {
         "branch for all repos (missing → default)",
         "branch name",
     )
+    .choice_input("group", "restrict to group", group_choices)
+    .bool_input("active_profile_only", "restrict to active profile", false)
 }
 
-/// (Re)applies the nav checkout-all button.
-pub fn render_checkout_all() -> Result<()> {
-    client::apply(&checkout_all_button())
+/// (Re)applies the nav checkout-all button, offering `groups` in its dropdown.
+pub fn render_checkout_all(groups: &[String]) -> Result<()> {
+    client::apply(&checkout_all_button(groups))
+}
+
+/// The chosen group from a checkout-all click's `group` input, or `None` for
+/// [`ALL_GROUPS`] / an absent value (no restriction).
+pub fn checkout_all_group(inputs: &HashMap<String, String>) -> Option<String> {
+    match inputs.get("group") {
+        Some(g) if !g.is_empty() && g != ALL_GROUPS => Some(g.clone()),
+        _ => None,
+    }
+}
+
+/// Whether a checkout-all click's "active profile only" checkbox was checked.
+pub fn checkout_all_profile_only(inputs: &HashMap<String, String>) -> bool {
+    inputs.get("active_profile_only").map(String::as_str) == Some("true")
 }
 
 /// Deletes the nav checkout-all button.
@@ -317,18 +339,61 @@ mod tests {
     }
 
     #[test]
-    fn checkout_all_is_a_nav_text_button() {
+    fn checkout_all_is_a_nav_button_with_branch_group_and_profile_inputs() {
         assert!(is_checkout_all_click("repos-checkout-all"));
         assert!(!is_checkout_all_click("repos-branch-x"));
 
-        let v = json(&checkout_all_button());
+        let v = json(&checkout_all_button(&[
+            "rating".to_string(),
+            "dashboard".to_string(),
+        ]));
         assert_eq!(v["metadata"]["name"], "repos-checkout-all");
+        assert_eq!(v["spec"]["text"], "⎇ checkout all repos");
         assert_eq!(v["spec"]["location"]["componentType"], "Global");
         assert_eq!(v["spec"]["location"]["componentID"], "nav");
         let inputs = v["spec"]["inputs"].as_array().unwrap();
-        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs.len(), 3);
         assert_eq!(inputs[0]["name"], "branch");
         assert!(inputs[0]["text"].is_object());
+        assert_eq!(inputs[1]["name"], "group");
+        assert_eq!(
+            inputs[1]["choice"]["choices"],
+            serde_json::json!(["(all groups)", "rating", "dashboard"])
+        );
+        assert_eq!(inputs[2]["name"], "active_profile_only");
+        assert_eq!(inputs[2]["bool"]["defaultValue"], false);
+    }
+
+    #[test]
+    fn checkout_all_group_reads_the_chosen_group_or_none_for_the_all_sentinel() {
+        assert_eq!(
+            checkout_all_group(&HashMap::from([(
+                "group".to_string(),
+                "rating".to_string()
+            )])),
+            Some("rating".to_string())
+        );
+        assert_eq!(
+            checkout_all_group(&HashMap::from([(
+                "group".to_string(),
+                ALL_GROUPS.to_string()
+            )])),
+            None
+        );
+        assert_eq!(checkout_all_group(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn checkout_all_profile_only_reads_the_checkbox() {
+        assert!(checkout_all_profile_only(&HashMap::from([(
+            "active_profile_only".to_string(),
+            "true".to_string()
+        )])));
+        assert!(!checkout_all_profile_only(&HashMap::from([(
+            "active_profile_only".to_string(),
+            "false".to_string()
+        )])));
+        assert!(!checkout_all_profile_only(&HashMap::new()));
     }
 
     #[test]

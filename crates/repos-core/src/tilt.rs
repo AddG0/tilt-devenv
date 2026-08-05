@@ -61,9 +61,11 @@ impl UiButton {
         self
     }
 
-    /// Add a single free-text input the click carries back under `name`.
+    /// Adds a free-text input the click carries back under `name`. Appends, so
+    /// a button can combine this with other inputs (e.g. a branch name plus a
+    /// filter dropdown).
     pub fn text_input(mut self, name: &str, label: &str, placeholder: &str) -> UiButton {
-        self.spec.inputs = vec![UiInput {
+        self.spec.inputs.push(UiInput {
             name: name.to_string(),
             label: label.to_string(),
             text: Some(UiText {
@@ -71,28 +73,26 @@ impl UiButton {
             }),
             choice: None,
             boolean: None,
-        }];
+        });
         self
     }
 
-    /// Add a single dropdown input the click carries back under `name` (the
-    /// chosen string arrives as that input's value).
+    /// Adds a dropdown input the click carries back under `name` (the chosen
+    /// string arrives as that input's value). Appends, like [`text_input`](Self::text_input).
     pub fn choice_input(mut self, name: &str, label: &str, choices: Vec<String>) -> UiButton {
-        self.spec.inputs = vec![UiInput {
+        self.spec.inputs.push(UiInput {
             name: name.to_string(),
             label: label.to_string(),
             text: None,
             choice: Some(UiChoice { choices }),
             boolean: None,
-        }];
+        });
         self
     }
 
-    /// Adds a checkbox input the click carries back under `name` — unlike
-    /// [`text_input`](Self::text_input)/[`choice_input`](Self::choice_input),
-    /// this appends rather than replaces, so a button can carry several (e.g.
-    /// one checkbox per option, for a multi-select the Tilt API has no native
-    /// widget for).
+    /// Adds a checkbox input the click carries back under `name`. Appends,
+    /// like [`text_input`](Self::text_input) — useful for several checkboxes on
+    /// one button (a multi-select the Tilt API has no native widget for).
     pub fn bool_input(mut self, name: &str, label: &str, default: bool) -> UiButton {
         self.spec.inputs.push(UiInput {
             name: name.to_string(),

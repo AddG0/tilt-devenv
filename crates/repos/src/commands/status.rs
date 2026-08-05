@@ -1,19 +1,52 @@
-use anyhow::Result;
-use repos_core::devenv::Workspace;
+use anyhow::{Result, bail};
+use repos_core::devenv::{Snapshot, Workspace};
 use repos_core::registry::Registry;
 
 use crate::cli::StatusArgs;
 use crate::output::{json, terminal};
 
 pub fn run(args: &StatusArgs) -> Result<()> {
-    let reg = Registry::load()?;
-    let names = reg.resolve_only(&[], &args.profile);
-    let ws = Workspace::from_registry(&reg);
-    let statuses = ws.filter(&names, &args.group).status_all(args.fetch);
+    if args.watch {
+        if args.json {
+            bail!("--watch doesn't support --json (it reprints a table, not a JSON stream)");
+        }
+        return watch(args);
+    }
+    let statuses = statuses_for(args, args.fetch)?;
     if args.json {
         json::print_status_json(&statuses)
     } else {
         terminal::print_status_table(&statuses);
         Ok(())
     }
+}
+
+/// Enough blank lines to scroll a previous table out of view in a normal
+/// terminal or Tilt's log pane — a real clear-screen escape doesn't survive
+/// Tilt's log capture, but plain newlines work everywhere.
+const BLANK_LINES: usize = 60;
+
+/// Reprints the table only when it changes, checking every `args.interval`
+/// until killed — printing on every tick regardless of change would flood
+/// the log with noise. Never fetches; pair with something else that does
+/// (e.g. `repos-tiltd`'s poll) rather than having two things fetch the same
+/// repos on independent schedules.
+fn watch(args: &StatusArgs) -> Result<()> {
+    let mut last: Option<Vec<Snapshot>> = None;
+    loop {
+        let statuses = statuses_for(args, false)?;
+        if last.as_ref() != Some(&statuses) {
+            print!("{}", "\n".repeat(BLANK_LINES));
+            terminal::print_status_table(&statuses);
+            last = Some(statuses);
+        }
+        std::thread::sleep(args.interval);
+    }
+}
+
+fn statuses_for(args: &StatusArgs, fetch: bool) -> Result<Vec<Snapshot>> {
+    let reg = Registry::load()?;
+    let names = reg.resolve_only(&[], &args.profile);
+    let ws = Workspace::from_registry(&reg);
+    Ok(ws.filter(&names, &args.group).status_all(fetch))
 }

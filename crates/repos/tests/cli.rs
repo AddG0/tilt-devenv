@@ -234,6 +234,52 @@ fn missing_registry_fails_with_a_clear_error() {
 }
 
 #[test]
+fn status_watch_rejects_json() {
+    let root = fixture(r#"[{"name":"foo","url":"u","group":"g"}]"#);
+    repos(&root)
+        .args(["status", "--watch", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--watch"));
+}
+
+#[test]
+fn status_watch_reprints_only_when_local_state_changes() {
+    let root = fixture(r#"[{"name":"repo","url":"u","group":"g"}]"#);
+    let repo_path = root.path().join("repo");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    repos_core::gittest::isolate();
+    repos_core::gittest::git(&repo_path, &["init", "-q", "-b", "main"]);
+    repos_core::gittest::commit(&repo_path, "README.md", "hi\n", "init");
+
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("repos"))
+        .env("REPOS_ROOT", root.path())
+        .env("XDG_STATE_HOME", root.path().join(".state"))
+        .env("NO_COLOR", "1")
+        .args(["status", "--watch", "--interval", "50ms"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    repos_core::gittest::write(&repo_path, "dirty.txt", "x");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    child.kill().unwrap();
+    let stdout = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned();
+
+    assert_eq!(
+        stdout.matches("clean").count(),
+        1,
+        "one printout before the mutation:\n{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("dirty").count(),
+        1,
+        "one printout after the mutation, not one per interval tick:\n{stdout}"
+    );
+}
+
+#[test]
 fn dynamic_completion_emits_a_shell_script() {
     // The flake's postInstall relies on `COMPLETE=<shell> repos` printing an
     // integration script and exiting 0.
