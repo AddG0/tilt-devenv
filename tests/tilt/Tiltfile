@@ -51,7 +51,9 @@ _eq(repos_profile_enabled(struct(name='other', group='ui'), _pf, ['frontend', 'b
 _eq(repos_profile_enabled(struct(name='web', group='ui'), {'ui-team': ['ui']}, ['ui-team']),
     True, 'enabled by group')
 _eq(repos_profile_enabled(struct(name='other', group='ui'), _pf, []),
-    True, 'empty active means every profile enabled')
+    False, 'empty active means none enabled yet, when profiles exist')
+_eq(repos_profile_enabled(struct(name='other', group='ui'), {}, []),
+    True, 'no profiles defined means nothing to scope to')
 
 # run.sh clears both env vars, so these are the unset defaults.
 _eq(repos_bin(), 'repos', 'repos_bin default')
@@ -65,7 +67,7 @@ if active != []:
 
 # A bare load with no active profile deliberately clones nothing (profiles
 # exist precisely so a developer never has to clone every repo — see
-# `Registry::is_unscoped_clone`), so pick one covering both repos first.
+# `Registry::is_unscoped`), so pick one covering both repos first.
 local('%s profile set alpha-only,beta-only' % repos_bin(), quiet=True, echo_off=True)
 
 # Integration: resolve the registry, clone missing repos, wire the live UI.

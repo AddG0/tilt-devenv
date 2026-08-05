@@ -232,14 +232,14 @@ impl Registry {
         self.scoped_with(only, groups, profiles, &self.active_profiles())
     }
 
-    /// Whether cloning `names`/`groups` from [`scoped`](Self::scoped) would
-    /// reach every repo in the registry by omission rather than deliberate
-    /// choice: profiles exist (so scoping is possible) but none is active,
-    /// and nothing explicit was passed. Profiles exist precisely so a
-    /// developer never has to clone — or have access to — every repo; a bare
-    /// `repos clone`/`pull`/`checkout` before ever picking one must not
-    /// silently attempt all of them.
-    pub fn is_unscoped_clone(&self, names: &[String], groups: &[String], all: bool) -> bool {
+    /// Whether `names`/`groups` (from [`scoped`](Self::scoped)) would reach
+    /// every repo in the registry by omission rather than deliberate choice:
+    /// profiles exist (so scoping is possible) but none is active, and
+    /// nothing explicit was passed. Profiles exist precisely so a developer
+    /// never has to clone, act on, or even see status for every repo; a bare
+    /// `repos clone`/`status`/`checkout`/`pull` before ever picking one must
+    /// not silently reach all of them.
+    pub fn is_unscoped(&self, names: &[String], groups: &[String], all: bool) -> bool {
         !all && names.is_empty() && groups.is_empty() && !self.profiles.is_empty()
     }
 
@@ -721,36 +721,33 @@ mod tests {
     }
 
     #[test]
-    fn is_unscoped_clone_true_when_profiles_exist_and_none_is_active() {
+    fn is_unscoped_true_when_profiles_exist_and_none_is_active() {
         let reg = registry_with_a_profile();
         assert!(
-            reg.is_unscoped_clone(&[], &[], false),
+            reg.is_unscoped(&[], &[], false),
             "no active profile + no explicit filter must not silently mean everything"
         );
     }
 
     #[test]
-    fn is_unscoped_clone_false_when_the_registry_has_no_profiles() {
+    fn is_unscoped_false_when_the_registry_has_no_profiles() {
         let reg = registry_with_frontend_and_backend();
         assert!(
-            !reg.is_unscoped_clone(&[], &[], false),
+            !reg.is_unscoped(&[], &[], false),
             "nothing to scope down to, so the whole registry is the only sensible target"
         );
     }
 
     #[test]
-    fn is_unscoped_clone_false_when_all_or_an_explicit_filter_is_given() {
+    fn is_unscoped_false_when_all_or_an_explicit_filter_is_given() {
         let reg = registry_with_a_profile();
+        assert!(!reg.is_unscoped(&[], &[], true), "--all is deliberate");
         assert!(
-            !reg.is_unscoped_clone(&[], &[], true),
-            "--all is deliberate"
-        );
-        assert!(
-            !reg.is_unscoped_clone(&["web".to_string()], &[], false),
+            !reg.is_unscoped(&["web".to_string()], &[], false),
             "a non-empty name filter is deliberate"
         );
         assert!(
-            !reg.is_unscoped_clone(&[], &["frontend".to_string()], false),
+            !reg.is_unscoped(&[], &["frontend".to_string()], false),
             "a non-empty group filter is deliberate"
         );
     }

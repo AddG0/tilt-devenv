@@ -36,9 +36,10 @@ Optionally, wrap the array in `{"repos": [...], "profiles": {...}}` to name prof
 profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`. Set the
 *persisted* active selection (survives a `tilt up` restart, XDG state) via `repos profile
 set frontend,backend` or the daemon's nav "profiles" button — a checkbox per profile; check
-any number and click to save (unchecking every box re-enables all of them). `repos profile
-active` reads the current selection; the Tiltfile extension exposes it via
-`repos_active_profiles()`/`repos_profile_enabled()` (see below).
+any number and click to save. `repos profile active` reads the current selection; the
+Tiltfile extension exposes it via `repos_active_profiles()`/`repos_profile_enabled()` (see
+below) — with profiles defined, nothing is enabled until one is picked, so a fresh `tilt up`
+runs no repo resources by default.
 
 Once a profile is active, every command (`clone`, `status`, `checkout`, `pull`) is capped to
 it by default — a repo outside the active selection isn't part of what you're working on, so
@@ -71,8 +72,8 @@ Local plugin dev: point `extension_repo` at `url='file:///abs/path/to/tilt-deven
 | `repos_browse_url(remote)` | git remote (scp/ssh/https) → browsable `https://host/path`. |
 | `repos_link(remote, label='Repo')` | Tilt `link` to that URL. |
 | `repos_profiles_load()` | Resolve `tilt-devenv.json`'s `profiles` → `{name: [repo-or-group, ...]}`. |
-| `repos_active_profiles()` | The persisted active profile selection (empty = every profile enabled); watches it for changes. |
-| `repos_profile_enabled(repo, profiles, active)` | Whether `repo` belongs to any of `active` profiles (or `active` is empty). |
+| `repos_active_profiles()` | The persisted active profile selection (empty = none picked yet); watches it for changes. |
+| `repos_profile_enabled(repo, profiles, active)` | Whether `repo` belongs to any of `active` profiles. True with no `active` only when `profiles` is empty (nothing to scope to). |
 
 ## Demo
 

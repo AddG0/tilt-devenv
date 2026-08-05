@@ -8,7 +8,7 @@ use crate::output::{json, terminal};
 pub fn run(args: &CloneArgs) -> Result<()> {
     let reg = Registry::load()?;
     let (names, groups) = reg.scoped(&args.only, &args.group, &args.profile, args.all)?;
-    if reg.is_unscoped_clone(&names, &groups, args.all) {
+    if reg.is_unscoped(&names, &groups, args.all) {
         if !args.json {
             eprintln!(
                 "repos: no active profile selected; nothing cloned. Run `repos profile set <name>` first, or pass --all to clone every repo."

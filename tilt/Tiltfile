@@ -107,11 +107,15 @@ def repos_profile_enabled(repo, profiles, active):
     profiles.
 
     `profiles` maps profile name -> repo/group names, from
-    `repos_profiles_load()`. An empty `active` means every profile is
-    enabled.
+    `repos_profiles_load()`.
+
+    No profiles defined means nothing to scope to — everything's enabled.
+    Otherwise an empty `active` means none is enabled yet, not all.
     """
-    if not active:
+    if not profiles:
         return True
+    if not active:
+        return False
     return any([
         repo.name in profiles.get(p, []) or repo.group in profiles.get(p, [])
         for p in active
