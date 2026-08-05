@@ -3,9 +3,9 @@
 #   ./bootstrap.sh    # create local demo repos + tilt-devenv.json (offline)
 #   tilt up           # from inside `nix develop` (provides `repos` + `tilt`)
 #
-# Two profiles are defined in tilt-devenv.json (alpha-only, beta-only) — try
-# `repos profile set alpha-only` (or the daemon's nav "profiles" button)
-# to see the other repo's resources disappear.
+# Two profiles are defined in tilt-devenv.json (alpha-only, beta-only), so
+# nothing runs until one is picked — try `repos profile set alpha-only`
+# (or the daemon's nav "profiles" button) to bring its repo's resources up.
 #
 # This demo is local-only (no Kubernetes); allow whatever kube context is
 # active so Tilt's production-context guard doesn't block the local() calls.

@@ -12,7 +12,7 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         }
         return watch(args);
     }
-    let statuses = statuses_for(args, args.fetch)?;
+    let statuses = statuses_for(args, args.fetch, !args.json)?;
     if args.json {
         json::print_status_json(&statuses)
     } else {
@@ -33,8 +33,10 @@ const BLANK_LINES: usize = 60;
 /// repos on independent schedules.
 fn watch(args: &StatusArgs) -> Result<()> {
     let mut last: Option<Vec<Snapshot>> = None;
+    let mut warned = false;
     loop {
-        let statuses = statuses_for(args, false)?;
+        let statuses = statuses_for(args, false, !warned)?;
+        warned = true;
         if last.as_ref() != Some(&statuses) {
             print!("{}", "\n".repeat(BLANK_LINES));
             terminal::print_status_table(&statuses);
@@ -44,9 +46,20 @@ fn watch(args: &StatusArgs) -> Result<()> {
     }
 }
 
-fn statuses_for(args: &StatusArgs, fetch: bool) -> Result<Vec<Snapshot>> {
+/// `warn` prints the no-active-profile note to stderr when unscoped — off for
+/// JSON output and after `watch`'s first tick, so a long-lived poll doesn't
+/// repeat it forever.
+fn statuses_for(args: &StatusArgs, fetch: bool, warn: bool) -> Result<Vec<Snapshot>> {
     let reg = Registry::load()?;
     let (names, groups) = reg.scoped(&[], &args.group, &args.profile, args.all)?;
+    if reg.is_unscoped(&names, &groups, args.all) {
+        if warn {
+            eprintln!(
+                "repos: no active profile selected; nothing to show. Run `repos profile set <name>` first, or pass --all for the whole registry."
+            );
+        }
+        return Ok(Vec::new());
+    }
     let ws = Workspace::from_registry(&reg);
     Ok(ws.filter(&names, &groups).status_all(fetch))
 }

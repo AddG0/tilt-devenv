@@ -403,7 +403,7 @@ fn clone_clones_nothing_when_profiles_exist_and_none_is_active() {
 }
 
 #[test]
-fn pull_and_checkout_do_not_auto_clone_when_profiles_exist_and_none_is_active() {
+fn pull_and_checkout_do_nothing_when_profiles_exist_and_none_is_active() {
     let (_origin, url) = bare_origin_url();
     let root = fixture(&format!(
         r#"{{"repos":[{{"name":"web","url":{},"group":"frontend"}}],
@@ -411,19 +411,83 @@ fn pull_and_checkout_do_not_auto_clone_when_profiles_exist_and_none_is_active() 
         serde_json::to_string(&url).unwrap(),
     ));
 
-    repos(&root).arg("pull").assert().success();
+    repos(&root)
+        .arg("pull")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("no active profile"));
     assert!(
         !root.path().join("web").exists(),
-        "pull's auto-clone must not reach every repo just because no profile is active"
+        "pull must not reach every repo just because no profile is active"
     );
 
     repos(&root)
         .args(["checkout", "default"])
         .assert()
-        .success();
+        .success()
+        .stderr(predicates::str::contains("no active profile"));
     assert!(
         !root.path().join("web").exists(),
-        "checkout's auto-clone must not reach every repo just because no profile is active"
+        "checkout must not reach every repo just because no profile is active"
+    );
+}
+
+#[test]
+fn pull_and_checkout_skip_an_already_cloned_repo_too_when_unscoped() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"}],
+            "profiles":{"frontend":["frontend"]}}"#,
+    );
+    let repo_path = root.path().join("web");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    repos_core::gittest::isolate();
+    repos_core::gittest::git(&repo_path, &["init", "-q", "-b", "main"]);
+    repos_core::gittest::commit(&repo_path, "README.md", "hi\n", "init");
+
+    let out = repos(&root).arg("pull").output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout).unwrap().is_empty(),
+        "pull must act on nothing, not just skip cloning it"
+    );
+
+    let out = repos(&root).args(["checkout", "default"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout).unwrap().is_empty(),
+        "checkout must act on nothing, not just skip cloning it"
+    );
+}
+
+#[test]
+fn status_shows_nothing_when_profiles_exist_and_none_is_active() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"}],
+            "profiles":{"frontend":["frontend"]}}"#,
+    );
+
+    let out = repos(&root).args(["status", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v, serde_json::json!([]), "nothing is in scope to report on");
+
+    repos(&root)
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("no active profile"));
+}
+
+#[test]
+fn status_covers_the_whole_registry_when_no_profiles_are_defined() {
+    let root = fixture(r#"[{"name":"foo","url":"u","group":"g"}]"#);
+    let out = repos(&root).args(["status", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v.as_array().unwrap().len(),
+        1,
+        "nothing to scope to, so status still covers everything"
     );
 }
 

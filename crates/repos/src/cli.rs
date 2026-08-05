@@ -66,15 +66,15 @@ pub struct ProfileArgs {
 pub enum ProfileCmd {
     /// Print the profile-selection state file's path (the Tiltfile watches it)
     StatePath,
-    /// Print the active profile selection (empty means every profile enabled)
+    /// Print the active profile selection (empty means none picked yet)
     Active {
         /// Emit a JSON array instead of one name per line
         #[arg(long)]
         json: bool,
     },
-    /// Persist a new active profile selection (comma-separated; empty enables every profile)
+    /// Persist a new active profile selection (comma-separated; empty clears it)
     Set {
-        /// Profile names to enable together (comma- or space-separated); omit to enable every profile
+        /// Profile names to enable together (comma- or space-separated); omit to clear the selection — nothing is enabled until one is picked
         #[arg(value_delimiter = ',', add = ArgValueCompleter::new(complete_profile_name))]
         profiles: Vec<String>,
     },
