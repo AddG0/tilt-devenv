@@ -23,13 +23,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Clone every repo not yet on disk (idempotent)
+    Clone(CloneArgs),
     /// Show current branch, dirty state, and ahead/behind for every repo
     Status(StatusArgs),
     /// Switch every repo to <branch>, falling back to each repo's default branch where it doesn't exist
     Checkout(CheckoutArgs),
     /// Fast-forward every repo to its upstream (never merges or rebases)
     Pull(PullArgs),
-    /// List every repo and where it lives on disk
+    /// List every repo and where it lives on disk (always shows every repo,
+    /// not just the active profile)
     List(ListArgs),
     /// List every named profile and the repos/groups it enables
     Profiles(ProfilesArgs),
@@ -78,6 +81,25 @@ pub enum ProfileCmd {
 }
 
 #[derive(Args)]
+pub struct CloneArgs {
+    /// Restrict to these repo names (comma-separated)
+    #[arg(long, value_delimiter = ',', add = ArgValueCompleter::new(complete_repo_name))]
+    pub only: Vec<String>,
+    /// Restrict to repos in these logical groups (comma-separated), e.g. `backend`
+    #[arg(long, short, value_delimiter = ',', add = ArgValueCompleter::new(complete_group_name))]
+    pub group: Vec<String>,
+    /// Restrict to repos in these named profiles (comma-separated), e.g. `frontend`
+    #[arg(long, short, value_delimiter = ',', add = ArgValueCompleter::new(complete_profile_name))]
+    pub profile: Vec<String>,
+    /// Ignore the active profile selection
+    #[arg(long)]
+    pub all: bool,
+    /// Emit JSON instead of one line per repo
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
 pub struct StatusArgs {
     /// Fetch each repo first so ahead/behind reflects the remote (slower)
     #[arg(long)]
@@ -88,6 +110,9 @@ pub struct StatusArgs {
     /// Restrict to repos in these named profiles (comma-separated), e.g. `frontend`
     #[arg(long, short, value_delimiter = ',', add = ArgValueCompleter::new(complete_profile_name))]
     pub profile: Vec<String>,
+    /// Ignore the active profile selection
+    #[arg(long)]
+    pub all: bool,
     /// Emit JSON instead of a table
     #[arg(long)]
     pub json: bool,
@@ -117,6 +142,9 @@ pub struct CheckoutArgs {
     /// Restrict to repos in these named profiles (comma-separated), e.g. `frontend`
     #[arg(long, short, value_delimiter = ',', add = ArgValueCompleter::new(complete_profile_name))]
     pub profile: Vec<String>,
+    /// Ignore the active profile selection
+    #[arg(long)]
+    pub all: bool,
     /// Show what would happen without switching any repo
     #[arg(long)]
     pub dry_run: bool,
@@ -133,6 +161,9 @@ pub struct PullArgs {
     /// Restrict to repos in these named profiles (comma-separated), e.g. `frontend`
     #[arg(long, short, value_delimiter = ',', add = ArgValueCompleter::new(complete_profile_name))]
     pub profile: Vec<String>,
+    /// Ignore the active profile selection
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args)]

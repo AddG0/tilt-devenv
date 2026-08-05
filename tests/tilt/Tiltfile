@@ -11,8 +11,9 @@
 # Local-only; allow whatever kube context is active (none, in the sandbox).
 allow_k8s_contexts(k8s_context())
 
-load('../../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_browse_url', 'repos_link',
-     'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled')
+load('../../tilt/Tiltfile', 'repos_load', 'repos_resolve', 'repos_status_ui', 'repos_browse_url',
+     'repos_link', 'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled',
+     'repos_bin', 'repos_tiltd_bin')
 
 # Unit assertions for repos_browse_url (pure remote -> browsable URL parser).
 def _eq(got, want, msg):
@@ -52,6 +53,21 @@ _eq(repos_profile_enabled(struct(name='web', group='ui'), {'ui-team': ['ui']}, [
 _eq(repos_profile_enabled(struct(name='other', group='ui'), _pf, []),
     True, 'empty active means every profile enabled')
 
+# run.sh clears both env vars, so these are the unset defaults.
+_eq(repos_bin(), 'repos', 'repos_bin default')
+_eq(repos_tiltd_bin(), 'repos-tiltd', 'repos_tiltd_bin default')
+
+# Nothing has been picked yet, so the persisted selection is empty (every
+# profile active) — checked before anything below picks one.
+active = repos_active_profiles()
+if active != []:
+    fail('repos_active_profiles default = %r, want empty (every profile active)' % active)
+
+# A bare load with no active profile deliberately clones nothing (profiles
+# exist precisely so a developer never has to clone every repo — see
+# `Registry::is_unscoped_clone`), so pick one covering both repos first.
+local('%s profile set alpha-only,beta-only' % repos_bin(), quiet=True, echo_off=True)
+
 # Integration: resolve the registry, clone missing repos, wire the live UI.
 repos = repos_load()
 
@@ -64,17 +80,19 @@ profiles = repos_profiles_load()
 if profiles != {'alpha-only': ['alpha'], 'beta-only': ['beta']}:
     fail('repos_profiles_load returned %r' % profiles)
 
-# Nothing has been picked yet, so the persisted selection is empty (every
-# profile active).
-active = repos_active_profiles()
-if active != []:
-    fail('repos_active_profiles default = %r, want empty (every profile active)' % active)
-
 for name in repos:
     r = repos[name]
     if not r.present:
         fail('%s: expected present=True after repos_load(clone_missing)' % name)
     local_resource(name, cmd='true', labels=['svc'], allow_parallel=True)
+
+# $REPOS_SHIM (run.sh) logs each call and execs the real `repos`, so a resolve
+# through it proves the CLI calls honor $REPOS_BIN rather than a hardcoded name.
+os.putenv('REPOS_BIN', os.getenv('REPOS_SHIM'))
+os.putenv('REPOS_TILTD_BIN', 'shim-tiltd')
+
+if sorted([r.name for r in repos_resolve(clone_missing=False)]) != ['alpha', 'beta']:
+    fail('repos_resolve through $REPOS_BIN did not resolve the registry')
 
 # The status UI must create exactly the repos-branches daemon + git-status table.
 repos_status_ui({name: name for name in repos}, repos, labels=['repos'])

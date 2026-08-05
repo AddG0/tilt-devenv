@@ -19,6 +19,12 @@ pub enum Error {
     /// overwritten. Distinct so callers can special-case a dirty checkout.
     #[error("working tree has changes that would be overwritten: {0}")]
     Dirty(String),
+    /// A clone/fetch failed because credentials or ACLs don't allow it, not
+    /// because anything is actually wrong — not having access to every repo
+    /// in the registry is the expected case a profile scopes around, not a
+    /// bug to report the same way as one.
+    #[error("{0}")]
+    AccessDenied(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -299,6 +305,76 @@ pub fn fetch(path: &Path) -> Result<()> {
 /// has diverged from its upstream or has none, so it never creates a merge commit.
 pub fn fast_forward(path: &Path) -> Result<()> {
     run(path, &["merge", "--ff-only", "@{u}"]).map(|_| ())
+}
+
+/// Clones `url` into `path`, which must not yet exist. Creates `path`'s parent
+/// directories first, since a sibling-layout repo's parent may not exist yet.
+pub fn clone(url: &str, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::Git(format!("creating {}: {e}", parent.display())))?;
+    }
+    let out = Command::new("git")
+        .args(["clone", "--quiet", url])
+        .arg(path)
+        .output()
+        .map_err(|e| Error::Git(format!("git clone {url} {}: {e}", path.display())))?;
+    if !out.status.success() {
+        return Err(classify_failure(
+            &out,
+            &format!("git clone {url} {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks whether `url` is reachable and permitted, without cloning it —
+/// `git ls-remote` just asks the remote to list its refs. Used before
+/// persisting a profile selection, so picking a profile with a repo you
+/// don't have access to fails immediately, not as a confusing clone failure
+/// after the fact.
+pub fn can_access(url: &str) -> Result<()> {
+    let out = Command::new("git")
+        .args(["ls-remote", "--exit-code", url])
+        .output()
+        .map_err(|e| Error::Git(format!("git ls-remote {url}: {e}")))?;
+    if !out.status.success() {
+        return Err(classify_failure(&out, &format!("git ls-remote {url}")));
+    }
+    Ok(())
+}
+
+/// Builds the [`Error`] for a failed git invocation, classifying its stderr
+/// as [`Error::AccessDenied`] or a generic [`Error::Git`].
+fn classify_failure(out: &std::process::Output, context: &str) -> Error {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let msg = stderr.trim();
+    let msg = if msg.is_empty() {
+        out.status.to_string()
+    } else {
+        msg.to_string()
+    };
+    let full = format!("{context}: {msg}");
+    if is_access_denied(&msg) {
+        Error::AccessDenied(full)
+    } else {
+        Error::Git(full)
+    }
+}
+
+/// Whether a clone/fetch failure's stderr reads as a credentials/ACL
+/// rejection rather than a generic failure (bad URL, network down, disk
+/// full). Hosts phrase this differently (GitHub, GitLab, self-hosted, SSH vs
+/// HTTPS), so this matches the common phrasings rather than any one host's
+/// exact wording — including "not found", since GitHub returns that for a
+/// private repo you can't see, indistinguishable from one that doesn't exist.
+fn is_access_denied(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("permission denied")
+        || s.contains("could not read from remote repository")
+        || s.contains("repository not found")
+        || s.contains("access denied")
+        || s.contains("authentication failed")
 }
 
 #[cfg(test)]
@@ -604,6 +680,73 @@ mod tests {
         match checkout(work.path(), "feature") {
             Err(Error::Dirty(_)) => {}
             other => panic!("want Err(Dirty), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_creates_a_working_tree_at_the_target_path() {
+        gittest::isolate();
+        let seed = gittest::init_repo();
+        let origin = gittest::clone_bare(seed.path());
+        let dest = TempDir::new().unwrap();
+        let target = dest.path().join("nested").join("repo");
+
+        clone(&origin.path().to_string_lossy(), &target).unwrap();
+
+        assert!(is_repo(&target), "clone should leave a working tree behind");
+        assert_eq!(get_status(&target).unwrap().branch, "main");
+    }
+
+    #[test]
+    fn can_access_succeeds_for_a_reachable_repo_without_cloning_it() {
+        gittest::isolate();
+        let seed = gittest::init_repo();
+        let origin = gittest::clone_bare(seed.path());
+
+        can_access(&origin.path().to_string_lossy()).unwrap();
+    }
+
+    #[test]
+    fn can_access_errors_for_an_unreachable_url() {
+        gittest::isolate();
+        assert!(can_access("/no/such/remote").is_err());
+    }
+
+    #[test]
+    fn clone_of_a_bad_url_errors_with_git_stderr() {
+        gittest::isolate();
+        let dest = TempDir::new().unwrap();
+        let err = clone("/no/such/remote", &dest.path().join("repo")).unwrap_err();
+        assert!(
+            matches!(err, Error::Git(_)),
+            "a nonexistent local path is a generic failure, not an access-denied one: {err:?}"
+        );
+    }
+
+    #[test]
+    fn is_access_denied_recognizes_common_host_phrasings() {
+        let denied = [
+            "Permission denied (publickey).\nfatal: Could not read from remote repository.",
+            "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://example.com/repo.git/'",
+            "remote: Repository not found.\nfatal: repository 'https://example.com/acme/private.git/' not found",
+        ];
+        for stderr in denied {
+            assert!(is_access_denied(stderr), "expected denied for: {stderr:?}");
+        }
+    }
+
+    #[test]
+    fn is_access_denied_ignores_generic_failures() {
+        let generic = [
+            "fatal: repository '/no/such/remote' does not exist",
+            "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host",
+            "fatal: destination path 'repo' already exists and is not an empty directory.",
+        ];
+        for stderr in generic {
+            assert!(
+                !is_access_denied(stderr),
+                "expected not denied for: {stderr:?}"
+            );
         }
     }
 

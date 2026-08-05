@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 /// The dev-environment manifest, found at the dev-env repo root.
@@ -70,7 +70,7 @@ pub struct Resolved {
 
 /// The parsed registry plus the resolution config (workspace base and per-repo
 /// overrides) discovered alongside `tilt-devenv.json`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Registry {
     /// Directory containing `tilt-devenv.json` (the dev-env repo root).
     pub root: PathBuf,
@@ -188,6 +188,97 @@ impl Registry {
                 }
             })
             .collect()
+    }
+
+    /// The developer's active profile selection (profile names, not repo
+    /// names) for this registry's root, read from the same XDG state the
+    /// Tiltfile and daemon persist to. Empty when none has ever been picked,
+    /// or it was explicitly cleared — both mean every profile is enabled.
+    pub fn active_profile_names(&self) -> Vec<String> {
+        crate::profile::state_path()
+            .map(|state| crate::profile::active(&state, &self.root))
+            .unwrap_or_default()
+    }
+
+    /// The repo names the active profile selection allows. Empty means no
+    /// restriction — see [`active_profile_names`](Self::active_profile_names).
+    pub fn active_profiles(&self) -> Vec<String> {
+        self.resolve_only(&[], &self.active_profile_names())
+    }
+
+    /// Resolves `only`/`group`/`profile` CLI flags into the names/groups
+    /// filter to pass to [`Workspace::filter`](crate::devenv::Workspace::filter),
+    /// enforcing the active profile selection as a hard ceiling: a repo
+    /// outside it isn't part of
+    /// what you're working on right now, so a `--group`/`--profile` filter
+    /// that reaches outside it is an error rather than a silent no-op. With
+    /// no explicit `only`/`group`/`profile`, the active selection *is* the
+    /// filter (empty selection restricts nothing, same as today).
+    ///
+    /// `only` and `all` are deliberate, name-exact overrides that always
+    /// bypass the ceiling — naming a repo directly, or asking for every repo,
+    /// is unambiguous intent, unlike a `--group`/`--profile` that might reach
+    /// further than you meant.
+    pub fn scoped(
+        &self,
+        only: &[String],
+        groups: &[String],
+        profiles: &[String],
+        all: bool,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        if all || !only.is_empty() {
+            return Ok((self.resolve_only(only, profiles), groups.to_vec()));
+        }
+        self.scoped_with(only, groups, profiles, &self.active_profiles())
+    }
+
+    /// Whether cloning `names`/`groups` from [`scoped`](Self::scoped) would
+    /// reach every repo in the registry by omission rather than deliberate
+    /// choice: profiles exist (so scoping is possible) but none is active,
+    /// and nothing explicit was passed. Profiles exist precisely so a
+    /// developer never has to clone — or have access to — every repo; a bare
+    /// `repos clone`/`pull`/`checkout` before ever picking one must not
+    /// silently attempt all of them.
+    pub fn is_unscoped_clone(&self, names: &[String], groups: &[String], all: bool) -> bool {
+        !all && names.is_empty() && groups.is_empty() && !self.profiles.is_empty()
+    }
+
+    /// [`scoped`](Self::scoped)'s logic, taking the active scope explicitly
+    /// so it's testable without touching real XDG state.
+    fn scoped_with(
+        &self,
+        only: &[String],
+        groups: &[String],
+        profiles: &[String],
+        scope: &[String],
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        if scope.is_empty() {
+            return Ok((self.resolve_only(only, profiles), groups.to_vec()));
+        }
+        if only.is_empty() && groups.is_empty() && profiles.is_empty() {
+            return Ok((scope.to_vec(), Vec::new()));
+        }
+        let names = self.resolve_only(only, profiles);
+        let touched: Vec<String> = self
+            .resolve()
+            .into_iter()
+            .filter(|r| names.is_empty() || names.contains(&r.repo.name))
+            .filter(|r| groups.is_empty() || groups.contains(&r.repo.group))
+            .map(|r| r.repo.name)
+            .collect();
+        let mut outside: Vec<&str> = touched
+            .iter()
+            .filter(|n| !scope.contains(n))
+            .map(String::as_str)
+            .collect();
+        outside.sort();
+        if !outside.is_empty() {
+            bail!(
+                "{} outside your active profile selection — run `repos profile set` to switch, or with no names to enable every profile",
+                outside.join(", "),
+            );
+        }
+        Ok((names, groups.to_vec()))
     }
 
     /// `only`, unioned with the repo names `profiles` resolve to — the combined
@@ -551,6 +642,117 @@ mod tests {
         let mut got = reg.resolve_only(&["foo".to_string()], &["p".to_string()]);
         got.sort();
         assert_eq!(got, vec!["bar".to_string(), "foo".to_string()]);
+    }
+
+    fn registry_with_frontend_and_backend() -> Registry {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"[{"name":"web","url":"u","group":"frontend"},
+                {"name":"design","url":"u","group":"frontend"},
+                {"name":"auth","url":"u","group":"backend"}]"#,
+        );
+        Registry::load_from(root.path()).unwrap()
+    }
+
+    #[test]
+    fn scoped_with_defaults_to_the_active_scope_when_nothing_explicit_is_given() {
+        let reg = registry_with_frontend_and_backend();
+        let scope = ["web".to_string(), "design".to_string()];
+        let (names, groups) = reg.scoped_with(&[], &[], &[], &scope).unwrap();
+        assert_eq!(names, scope);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn scoped_with_allows_narrowing_within_the_active_scope() {
+        let reg = registry_with_frontend_and_backend();
+        let scope = ["web".to_string(), "design".to_string()];
+        let (names, _) = reg
+            .scoped_with(&["web".to_string()], &[], &[], &scope)
+            .unwrap();
+        assert_eq!(names, vec!["web".to_string()]);
+    }
+
+    #[test]
+    fn scoped_with_rejects_an_only_name_outside_the_active_scope() {
+        let reg = registry_with_frontend_and_backend();
+        let scope = ["web".to_string(), "design".to_string()];
+        let err = reg
+            .scoped_with(&["auth".to_string()], &[], &[], &scope)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("auth"),
+            "error should name the out-of-scope repo: {err}"
+        );
+    }
+
+    #[test]
+    fn scoped_with_rejects_a_group_that_reaches_outside_the_active_scope() {
+        let reg = registry_with_frontend_and_backend();
+        let scope = ["web".to_string(), "design".to_string()];
+        let err = reg
+            .scoped_with(&[], &["backend".to_string()], &[], &scope)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("auth"),
+            "error should name auth, the backend-group repo outside scope: {err}"
+        );
+    }
+
+    #[test]
+    fn scoped_with_is_unrestricted_when_no_profile_is_active() {
+        let reg = registry_with_frontend_and_backend();
+        let (names, groups) = reg.scoped_with(&[], &[], &[], &[]).unwrap();
+        assert!(names.is_empty(), "empty scope means no restriction");
+        assert!(groups.is_empty());
+    }
+
+    fn registry_with_a_profile() -> Registry {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"web","url":"u","group":"frontend"}],
+                "profiles":{"frontend":["frontend"]}}"#,
+        );
+        Registry::load_from(root.path()).unwrap()
+    }
+
+    #[test]
+    fn is_unscoped_clone_true_when_profiles_exist_and_none_is_active() {
+        let reg = registry_with_a_profile();
+        assert!(
+            reg.is_unscoped_clone(&[], &[], false),
+            "no active profile + no explicit filter must not silently mean everything"
+        );
+    }
+
+    #[test]
+    fn is_unscoped_clone_false_when_the_registry_has_no_profiles() {
+        let reg = registry_with_frontend_and_backend();
+        assert!(
+            !reg.is_unscoped_clone(&[], &[], false),
+            "nothing to scope down to, so the whole registry is the only sensible target"
+        );
+    }
+
+    #[test]
+    fn is_unscoped_clone_false_when_all_or_an_explicit_filter_is_given() {
+        let reg = registry_with_a_profile();
+        assert!(
+            !reg.is_unscoped_clone(&[], &[], true),
+            "--all is deliberate"
+        );
+        assert!(
+            !reg.is_unscoped_clone(&["web".to_string()], &[], false),
+            "a non-empty name filter is deliberate"
+        );
+        assert!(
+            !reg.is_unscoped_clone(&[], &["frontend".to_string()], false),
+            "a non-empty group filter is deliberate"
+        );
     }
 
     #[test]

@@ -1,7 +1,4 @@
-# repos — Tilt extension
-#
-# Reusable Tilt glue for the `repos` multi-repo branch tool. Load it from a
-# project Tiltfile:
+# repos — Tilt extension for the `repos` multi-repo branch tool.
 #
 #     v1alpha1.extension_repo(name='repos', url='https://…/tilt-devenv')
 #     v1alpha1.extension(name='repos', repo_name='repos', repo_path='tilt')
@@ -10,87 +7,109 @@
 #     repos = repos_load()
 #     repos_status_ui({'my-service': 'my-service-repo'}, repos)
 #
-# To gate resources behind a named profile (`tilt-devenv.json`'s `profiles` key,
-# also usable via `repos --profile`), additionally load `repos_profiles_load`,
-# `repos_active_profiles`, `repos_profile_enabled`. The active selection is
-# persisted (XDG state, survives a `tilt up` restart) — set it from the
-# daemon's nav "profiles" button or `repos profile set`:
+# For profile-gated resources, also load `repos_profiles_load`,
+# `repos_active_profiles`, and `repos_profile_enabled`. See their docstrings
+# below.
 #
-#     profiles = repos_profiles_load()
-#     active = repos_active_profiles()
-#     for name, r in repos.items():
-#         if repos_profile_enabled(r, profiles, active):
-#             k8s_resource(name, labels=[r.group])
+# Requires `repos` and `repos-tiltd` on PATH. Get them from the Nix flake, or
+# `cargo install --path crates/repos --path crates/repos-tiltd`.
 #
-# Requires the `repos` and `repos-tiltd` binaries on PATH (ship them via the
-# tool's Nix flake, or `cargo install --path crates/repos --path crates/repos-tiltd`).
-#
-# `repos_load` and `repos_status_ui`'s `git-status` resource shell out to
-# `repos`, which finds its registry by walking up from the working directory for
-# `tilt-devenv.json` — so the loading Tiltfile must sit at (or under) the dev-env root
-# that holds `tilt-devenv.json`.
+# The loading Tiltfile must sit at or under the dev-env root, wherever
+# `tilt-devenv.json` lives.
+
+def repos_bin():
+    """
+    The `repos` CLI invocation: `$REPOS_BIN`, else `repos` from PATH.
+
+    A command prefix, not just a path, so it can be a builder:
+    `REPOS_BIN='cargo run --manifest-path /abs/Cargo.toml -p repos --'`. Read
+    per call, so `os.putenv` in the loading Tiltfile still takes effect.
+    """
+    return os.getenv('REPOS_BIN', 'repos')
+
+def repos_tiltd_bin():
+    """
+    The `repos-tiltd` daemon invocation: `$REPOS_TILTD_BIN`, else PATH.
+    """
+    return os.getenv('REPOS_TILTD_BIN', 'repos-tiltd')
 
 def repos_load(clone_missing=True):
-    """Resolve every repo via `repos list --json` and return a dict keyed by
-    name. Each value is a struct(name, url, group, path, present). When
-    `clone_missing` is set, repos not yet on disk are cloned first.
+    """
+    Resolves every repo via `repos list --json`.
 
-    A dict has no order; if the caller needs the registry order (the order of
-    `tilt-devenv.json`), iterate `repos_resolve()` instead."""
+    Returns {name: struct(name, url, group, path, present)}.
+
+    When `clone_missing` is set, `repos clone` runs first. That's scoped to
+    the active profile, not the whole registry.
+
+    Use `repos_resolve()` instead if you need registry order.
+    """
     return {r.name: r for r in repos_resolve(clone_missing=clone_missing)}
 
 def repos_resolve(clone_missing=True):
-    """Like `repos_load`, but returns a list in registry order (the order of
-    `tilt-devenv.json`)."""
-    # Reload the Tiltfile when the active worktree selection changes, so picking
-    # a worktree on a resource re-resolves its path and restarts it.
-    watch_file(str(local('repos worktree state-path', quiet=True, echo_off=True)).strip())
+    """
+    Like `repos_load`, but returns a list in registry order.
+    """
+    # Reload on a worktree-selection change, so picking one re-resolves the
+    # affected resource's path and restarts it.
+    bin = repos_bin()
+    watch_file(str(local('%s worktree state-path' % bin, quiet=True, echo_off=True)).strip())
+    if clone_missing:
+        local('%s clone' % bin, quiet=True, echo_off=True)
     resolved = decode_json(str(local(
-        'repos list --json',
+        '%s list --json' % bin,
         quiet=True,
         echo_off=True,
     )))
-    return [_make_repo(r, clone_missing) for r in resolved]
+    return [_make_repo(r) for r in resolved]
 
-def _make_repo(r, clone_missing):
-    path = r['path']
-    if clone_missing and not os.path.exists(path):
-        local('git clone %s %s' % (r['url'], path))
+def _make_repo(r):
     return struct(
         name=r['name'],
         url=r['url'],
         group=r['group'],
-        path=path,
-        present=os.path.exists(os.path.join(path, '.git')),
+        path=r['path'],
+        present=r['present'],
     )
 
 def repos_profiles_load():
-    """Resolve every profile via `repos profiles --json` and return a dict:
-    {profile_name: [repo-or-group name, ...]}, per `tilt-devenv.json`'s
-    `profiles` key."""
+    """
+    Resolves `tilt-devenv.json`'s `profiles`, via `repos profiles --json`.
+
+    Returns {profile_name: [repo-or-group name, ...]}.
+    """
     return decode_json(str(local(
-        'repos profiles --json',
+        '%s profiles --json' % repos_bin(),
         quiet=True,
         echo_off=True,
     )))
 
 def repos_active_profiles():
-    """The developer's persisted active profile selection (a list; empty means
-    every profile enabled) — set via the daemon's nav "profiles" button or
-    `repos profile set`. Watches the selection's state file, so picking a
-    profile reloads the Tiltfile and redefines resources to match."""
-    watch_file(str(local('repos profile state-path', quiet=True, echo_off=True)).strip())
+    """
+    The persisted active profile selection.
+
+    Empty means every profile is enabled.
+
+    Watches its state file, so picking a profile reloads the Tiltfile and
+    redefines resources to match.
+    """
+    bin = repos_bin()
+    watch_file(str(local('%s profile state-path' % bin, quiet=True, echo_off=True)).strip())
     return decode_json(str(local(
-        'repos profile active --json',
+        '%s profile active --json' % bin,
         quiet=True,
         echo_off=True,
     )))
 
 def repos_profile_enabled(repo, profiles, active):
-    """True if `repo` (a `repos_load()` struct — `.name`, `.group`) belongs to
-    any of `active` profiles, per `profiles` (profile name -> repo/group names,
-    from `repos_profiles_load()`). An empty `active` means every profile is
-    enabled."""
+    """
+    True if `repo` (`.name`/`.group`) belongs to any of the `active`
+    profiles.
+
+    `profiles` maps profile name -> repo/group names, from
+    `repos_profiles_load()`. An empty `active` means every profile is
+    enabled.
+    """
     if not active:
         return True
     return any([
@@ -99,9 +118,13 @@ def repos_profile_enabled(repo, profiles, active):
     ])
 
 def repos_browse_url(remote):
-    """Turn a git remote — scp-SSH (`git@host:path`), `ssh://host/path`, or
-    `https://host/path` — into a browsable `https://host/path` URL. The host is
-    preserved, so this works for gitlab.com, github.com, and self-hosted alike."""
+    """
+    Turns a git remote into a browsable `https://host/path` URL.
+
+    Handles scp-SSH (`git@host:path`), `ssh://host/path`, and
+    `https://host/path` forms. Works for gitlab.com, github.com, or
+    self-hosted alike.
+    """
     if remote.startswith('ssh://'):
         rest = remote[len('ssh://'):]           # [user@]host[:port]/path
         parts = rest.split('/', 1)
@@ -120,8 +143,11 @@ def repos_browse_url(remote):
     return 'https://%s/%s' % (host, path)
 
 def repos_link(remote, label='Repo'):
-    """A Tilt `link` to the browsable page for a git `remote` (see
-    `repos_browse_url`). Pass e.g. `repos_link(repos['foo'].url)`."""
+    """
+    A Tilt `link` to the browsable page for a git `remote`.
+
+    See `repos_browse_url`. Example: `repos_link(repos['foo'].url)`.
+    """
     return link(repos_browse_url(remote), label)
 
 def repos_status_ui(
@@ -129,37 +155,24 @@ def repos_status_ui(
         repos,
         status_links=[],
         rust_log='repos_tiltd=info,repos_core=info',
-        serve_cmd='repos-tiltd',
-        status_serve_cmd='repos status --watch',
         deps=[],
         labels=None):
-    """Wire up the live cross-repo UI, two independent long-lived resources:
+    """
+    Creates two long-lived resources: `repos-branches` (branch/pull buttons
+    and checkout-all — the only one of the two that fetches remotes) and
+    `git-status` (a live status table that only reads local git state, so it
+    can't race that fetch).
 
-      * `repos-branches` — a `repos-tiltd` daemon that puts a live branch
-        picker + pull button on each mapped resource and a global checkout-all
-        button (optionally restricted to one group, or to the active
-        profile's repos), handling clicks in-process. It's the only one of
-        the two that fetches remotes, on a timer (`repos-tiltd --poll`).
-      * `git-status` — a self-refreshing `repos status --watch` table pane. It
-        never fetches on its own (so it can't race `repos-branches`'s fetch);
-        it just redraws from local git state on its own short interval.
-
-    `branch_resources` maps a Tilt resource name -> the repo name (key in
-    `repos`) whose branch it shows; they differ when a repo backs a
-    differently-named resource. `status_links` are extra `link()`s to attach to
-    the status pane (e.g. the dev-env repo's own remote). `serve_cmd`,
-    `status_serve_cmd`, and `deps` default to the packaged binaries; pass
-    `serve_cmd='cargo run -p repos-tiltd'`, `status_serve_cmd='cargo run -p
-    repos -- status --watch'`, and `deps=['<repo>/crates']` to run both from
-    source instead, rebuilt on every restart Tilt triggers from a `deps`
-    change (see `dev/Tiltfile`)."""
+    `branch_resources` maps a Tilt resource name to the repo name (a key in
+    `repos`). `status_links` are extra `link()`s for the status pane.
+    """
     spec = [
         {'resource': res, 'repo': repo, 'path': repos[repo].path, 'group': repos[repo].group}
         for res, repo in branch_resources.items()
     ]
     local_resource(
         'repos-branches',
-        serve_cmd=serve_cmd,
+        serve_cmd=repos_tiltd_bin(),
         serve_env={
             'REPOS_TILT_SPEC': encode_json(spec),
             'RUST_LOG': rust_log,
@@ -170,7 +183,7 @@ def repos_status_ui(
     )
     local_resource(
         'git-status',
-        serve_cmd=status_serve_cmd,
+        serve_cmd='%s status --watch' % repos_bin(),
         deps=deps,
         allow_parallel=True,
         links=status_links,

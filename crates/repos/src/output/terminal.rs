@@ -362,6 +362,38 @@ pub fn print_pull_results(results: &[OpResult]) {
     println!("{}", pull_summary(results));
 }
 
+/// Renders a single clone result.
+fn clone_line(r: &OpResult) -> String {
+    let err = r.err.as_deref().unwrap_or_default();
+    match r.outcome {
+        Outcome::Cloned => green(&format!("⬇ cloned {}", r.name)),
+        Outcome::AlreadyPresent => dim(&format!("✓ {} already present", r.name)),
+        Outcome::AccessDenied => yellow(&format!("● no access to {}", r.name)),
+        Outcome::Errored => red(&format!("! {}: {}", r.name, err)),
+        _ => String::new(),
+    }
+}
+
+/// Renders the tallied one-line summary of a clone run.
+fn clone_summary(results: &[OpResult]) -> String {
+    let n = |o| count_with_outcome(results, o);
+    dim(&format!(
+        "— {} cloned, {} already present, {} no access, {} errored",
+        n(Outcome::Cloned),
+        n(Outcome::AlreadyPresent),
+        n(Outcome::AccessDenied),
+        n(Outcome::Errored),
+    ))
+}
+
+/// Prints one line per repo plus a tallied summary for a clone run.
+pub fn print_clone_results(results: &[OpResult]) {
+    for r in results {
+        println!("{}", clone_line(r));
+    }
+    println!("{}", clone_summary(results));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

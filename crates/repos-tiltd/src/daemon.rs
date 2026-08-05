@@ -94,6 +94,8 @@ pub fn run(poll: Duration) -> Result<()> {
             group: s.group,
             resource: s.resource,
             path: s.path,
+            // The Tiltfile clones before the daemon starts; it never clones.
+            url: String::new(),
         })
         .collect();
 
@@ -154,19 +156,18 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
         .map(|r| r.profiles.keys().cloned().collect())
         .unwrap_or_default();
     // The developer's persisted selection (XDG state, survives a `tilt up`
-    // restart) — the profile button's checkbox defaults, and where a click
-    // saves a new selection.
+    // restart) — the profile button's checkbox defaults, and (via
+    // `profile_state`) where a click saves a new selection.
     let profile_state = repos_core::profile::state_path();
-    let active_profiles = root
-        .as_deref()
-        .zip(profile_state.as_deref())
-        .map(|(root, state)| repos_core::profile::active(state, root))
+    let active_profiles = reg
+        .as_ref()
+        .map(|r| r.active_profile_names())
         .unwrap_or_default();
     // The active profiles' repo names, for checkout-all's "active profile only"
     // checkbox.
     let active_profile_repos: Vec<String> = reg
         .as_ref()
-        .map(|r| r.resolve_only(&[], &active_profiles))
+        .map(|r| r.active_profiles())
         .unwrap_or_default();
 
     let mut groups: Vec<String> = ws
@@ -184,6 +185,7 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
         root,
         profile_state,
         active_profile_repos,
+        reg,
     };
 
     // Button clicks. If watching fails, keep serving status: the sender is held
@@ -289,6 +291,10 @@ struct ClickContext {
     /// The active profiles' repo names, for checkout-all's "active profile
     /// only" checkbox.
     active_profile_repos: Vec<String>,
+    /// For checking access to a newly-picked profile's repos before saving
+    /// it (best-effort — skipped, so the switch is never blocked, when the
+    /// registry couldn't be loaded).
+    reg: Option<Registry>,
 }
 
 /// Dispatches a button press to the matching project's in-process operation, off
@@ -311,7 +317,10 @@ fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
     if buttons::is_profile_click(&c.button) {
         let checked = checked_profiles(&c.inputs);
         if let (Some(root), Some(state)) = (ctx.root.clone(), ctx.profile_state.clone()) {
-            tokio::task::spawn_blocking(move || switch_profile(&state, &root, &checked));
+            let reg = ctx.reg.clone();
+            tokio::task::spawn_blocking(move || {
+                switch_profile(&state, &root, reg.as_ref(), &checked)
+            });
         } else {
             tracing::error!("no dev-env root or profile-state path; ignoring profile click");
         }
@@ -450,7 +459,25 @@ fn checked_profiles(inputs: &HashMap<String, String>) -> Vec<String> {
 /// profile). The Tiltfile watches this file, so saving it triggers the reload
 /// that redefines resources for the new selection — no `tilt args` involved, so
 /// it survives a `tilt up` restart.
-fn switch_profile(state: &Path, root: &Path, checked: &[String]) {
+///
+/// Refuses to save (best-effort, via `reg`) when a not-yet-cloned repo in
+/// `checked` isn't reachable — better to fail the switch than persist a
+/// selection the next Tiltfile reload can't actually clone.
+fn switch_profile(state: &Path, root: &Path, reg: Option<&Registry>, checked: &[String]) {
+    if let Some(reg) = reg {
+        let names = reg.resolve_only(&[], checked);
+        let inaccessible = Workspace::from_registry(reg)
+            .filter(&names, &[])
+            .inaccessible();
+        if !inaccessible.is_empty() {
+            tracing::error!(
+                profiles = ?checked,
+                repos = ?inaccessible.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                "profile selection not saved: no access to one or more repos"
+            );
+            return;
+        }
+    }
     match repos_core::profile::set_active(state, root, checked) {
         Ok(()) => tracing::info!(profiles = ?checked, "profile selection saved"),
         Err(e) => tracing::error!(error = %e, "saving profile selection failed"),

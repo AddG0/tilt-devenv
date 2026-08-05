@@ -26,6 +26,7 @@ clap_complete = { version = "4", features = ["unstable-dynamic"] }
 humantime = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "process"] }
 notify = "8"
+rayon = "1"
 comfy-table = { version = "7", features = ["custom_styling"] }
 owo-colors = { version = "4", features = ["supports-colors"] }
 futures = "0.3"

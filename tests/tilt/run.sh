@@ -17,6 +17,10 @@ for tool in repos tilt git python3; do
   command -v "$tool" >/dev/null || { echo "FAIL: '$tool' not on PATH" >&2; exit 1; }
 done
 
+# The fixture asserts the unset defaults, so a caller's override must not leak in.
+# To test a source build: PATH=target/debug:$PATH bash tests/tilt/run.sh
+unset REPOS_BIN REPOS_TILTD_BIN
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -57,6 +61,18 @@ EOF
 # tilt-devenv.json), so everything lands inside the temp workspace.
 export REPOS_ROOT="$WORK"
 
+# What the fixture points $REPOS_BIN at — if the extension ever hardcodes `repos`
+# again, this log stays empty.
+shim_log="$WORK/shim-calls.txt"
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/repos-shim" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$shim_log"
+exec repos "\$@"
+EOF
+chmod +x "$WORK/bin/repos-shim"
+export REPOS_SHIM="$WORK/bin/repos-shim"
+
 result="$WORK/result.json"
 if ! tilt alpha tiltfile-result -f "$HERE/Tiltfile" > "$result" 2> "$WORK/stderr.txt"; then
   echo "FAIL: tilt alpha tiltfile-result exited non-zero" >&2
@@ -64,7 +80,7 @@ if ! tilt alpha tiltfile-result -f "$HERE/Tiltfile" > "$result" 2> "$WORK/stderr
   exit 1
 fi
 
-python3 - "$result" <<'PY'
+python3 - "$result" "$REPOS_SHIM" <<'PY'
 import json, sys
 
 data = json.load(open(sys.argv[1]))
@@ -87,5 +103,24 @@ if not any(str(f).endswith("repos/worktrees.json") for f in config_files):
     print("FAIL: worktree state file not watched; ConfigFiles = %r" % config_files, file=sys.stderr)
     sys.exit(1)
 
-print("PASS: Tiltfile evaluated clean; resources = %s; worktree state watched" % names)
+# The long-lived resources must serve the overridden binaries, not `repos`.
+serve = {
+    m.get("Name") or m.get("name"):
+        (((m.get("DeployTarget") or {}).get("ServeCmd") or {}).get("Argv") or [""])[-1]
+    for m in data.get("Manifests", [])
+}
+for name, want_cmd in [("git-status", "%s status --watch" % sys.argv[2]),
+                       ("repos-branches", "shim-tiltd")]:
+    if serve.get(name) != want_cmd:
+        print("FAIL: %s serve_cmd = %r, want %r" % (name, serve.get(name), want_cmd), file=sys.stderr)
+        sys.exit(1)
+
+print("PASS: Tiltfile evaluated clean; resources = %s; worktree state watched; "
+      "serve cmds from env" % names)
 PY
+
+if [[ ! -s "$shim_log" ]]; then
+  echo "FAIL: no CLI call went through \$REPOS_BIN (shim log empty)" >&2
+  exit 1
+fi
+echo "PASS: \$REPOS_BIN routed $(wc -l < "$shim_log") CLI call(s)"

@@ -20,6 +20,7 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
+rayon.workspace = true
 # Only the mpsc channel the Tilt click stream delivers on — no runtime — so a
 # consumer using core without Tilt still gets a lean tokio.
 tokio = { version = "1", features = ["sync"] }

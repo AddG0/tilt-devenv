@@ -17,6 +17,10 @@ devShells.default = pkgs.mkShell {
 
 Non-Nix: `cargo install --path crates/repos --path crates/repos-tiltd`.
 
+Off-PATH builds: `$REPOS_BIN` / `$REPOS_TILTD_BIN` replace those invocations everywhere the
+extension uses them. They're command prefixes, not just paths, so they can be builders —
+`REPOS_BIN='cargo run --manifest-path /abs/Cargo.toml -p repos --'` (see `dev/Tiltfile`).
+
 **2. Add `tilt-devenv.json` at your dev-env root.** An ordered list of repos:
 
 ```json
@@ -29,13 +33,19 @@ Non-Nix: `cargo install --path crates/repos --path crates/repos-tiltd`.
 Path resolution: `tilt_config.json` override > `ghq` checkout > sibling dir. See `repos --help`.
 
 Optionally, wrap the array in `{"repos": [...], "profiles": {...}}` to name profiles — a
-profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`. Use them
-via `repos --profile=frontend` (a one-off filter on `status`/`checkout`/`pull`), `repos
-profiles` to list them, or as a *persisted* selection (survives a `tilt up` restart, XDG
-state) via `repos profile set frontend,backend` or the daemon's nav "profiles"
-button — a checkbox per profile; check any number and click to save (unchecking every box
-re-enables all of them). `repos profile active` reads the current selection; the Tiltfile
-extension exposes it via `repos_active_profiles()`/`repos_profile_enabled()` (see below).
+profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`. Set the
+*persisted* active selection (survives a `tilt up` restart, XDG state) via `repos profile
+set frontend,backend` or the daemon's nav "profiles" button — a checkbox per profile; check
+any number and click to save (unchecking every box re-enables all of them). `repos profile
+active` reads the current selection; the Tiltfile extension exposes it via
+`repos_active_profiles()`/`repos_profile_enabled()` (see below).
+
+Once a profile is active, every command (`clone`, `status`, `checkout`, `pull`) is capped to
+it by default — a repo outside the active selection isn't part of what you're working on, so
+`repos clone` alone only clones its repos, not the whole registry. `--profile=other`/
+`--group=other` still can't reach outside the active selection (that's an error, not a silent
+no-op); naming a repo exactly via `--only`, or passing `--all`, is a deliberate override and
+always works. `repos profiles` lists every profile regardless of what's active.
 
 **3. Load the extension** in your Tiltfile:
 
@@ -44,7 +54,7 @@ v1alpha1.extension_repo(name='repos', url='https://github.com/AddG0/tilt-devenv'
 v1alpha1.extension(name='repos', repo_name='repos', repo_path='tilt')
 load('ext://repos', 'repos_load', 'repos_status_ui', 'repos_link')
 
-repos = repos_load()                                  # resolve tilt-devenv.json; clone missing
+repos = repos_load()          # resolve tilt-devenv.json; `repos clone` grabs missing repos
 repos_status_ui({'auth': 'auth', 'web': 'web'}, repos)  # {resource: repo} → live buttons + status
 ```
 
@@ -54,9 +64,10 @@ Local plugin dev: point `extension_repo` at `url='file:///abs/path/to/tilt-deven
 
 | Function | Purpose |
 | --- | --- |
-| `repos_load(clone_missing=True)` | Resolve registry → `{name: struct(name, url, group, path, present)}`. |
+| `repos_load(clone_missing=True)` | Resolve registry → `{name: struct(name, url, group, path, present)}`. `clone_missing` runs `repos clone` first (scoped to the active profile — see above), a full registry inventory either way. |
 | `repos_resolve(clone_missing=True)` | Same, as a list in `tilt-devenv.json` order. |
-| `repos_status_ui(branch_resources, repos, status_links=[], rust_log=…, serve_cmd='repos-tiltd', deps=[], labels=None)` | `repos-branches` daemon + `git-status` table. |
+| `repos_status_ui(branch_resources, repos, status_links=[], rust_log=…, deps=[], labels=None)` | `repos-branches` daemon + `git-status` table. |
+| `repos_bin()` / `repos_tiltd_bin()` | The configured invocations: `$REPOS_BIN` (default `repos`), `$REPOS_TILTD_BIN` (default `repos-tiltd`). |
 | `repos_browse_url(remote)` | git remote (scp/ssh/https) → browsable `https://host/path`. |
 | `repos_link(remote, label='Repo')` | Tilt `link` to that URL. |
 | `repos_profiles_load()` | Resolve `tilt-devenv.json`'s `profiles` → `{name: [repo-or-group, ...]}`. |
@@ -68,7 +79,7 @@ Local plugin dev: point `extension_repo` at `url='file:///abs/path/to/tilt-deven
 ```bash
 nix develop
 just demo   # examples/bootstrap.sh (throwaway local repos + tilt-devenv.json, offline) + tilt up
-just dev    # same, but repos-tiltd runs `cargo run` from source instead of the Nix-packaged binary
+just dev    # same, but every repos/repos-tiltd call runs `cargo run` from source (via $REPOS_BIN)
 ```
 
 ## Develop

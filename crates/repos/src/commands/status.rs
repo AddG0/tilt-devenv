@@ -46,7 +46,7 @@ fn watch(args: &StatusArgs) -> Result<()> {
 
 fn statuses_for(args: &StatusArgs, fetch: bool) -> Result<Vec<Snapshot>> {
     let reg = Registry::load()?;
-    let names = reg.resolve_only(&[], &args.profile);
+    let (names, groups) = reg.scoped(&[], &args.group, &args.profile, args.all)?;
     let ws = Workspace::from_registry(&reg);
-    Ok(ws.filter(&names, &args.group).status_all(fetch))
+    Ok(ws.filter(&names, &groups).status_all(fetch))
 }

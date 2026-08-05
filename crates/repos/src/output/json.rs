@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use repos_core::devenv::Snapshot;
+use repos_core::devenv::{OpResult, Snapshot};
 use repos_core::registry::Resolved;
 use serde::Serialize;
 
@@ -68,6 +68,27 @@ pub fn print_list_json(repos: &[Resolved]) -> Result<()> {
 
 pub fn print_profiles_json(profiles: &BTreeMap<String, Vec<String>>) -> Result<()> {
     print_json(profiles)
+}
+
+/// One item of `repos clone --json`.
+#[derive(Serialize)]
+struct CloneItem {
+    name: String,
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+pub fn print_clone_json(results: &[OpResult]) -> Result<()> {
+    let items: Vec<CloneItem> = results
+        .iter()
+        .map(|r| CloneItem {
+            name: r.name.clone(),
+            outcome: r.outcome.label().to_string(),
+            error: r.err.clone(),
+        })
+        .collect();
+    print_json(&items)
 }
 
 pub fn print_status_json(statuses: &[Snapshot]) -> Result<()> {

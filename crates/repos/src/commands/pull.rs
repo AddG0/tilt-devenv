@@ -7,8 +7,12 @@ use crate::output::terminal;
 
 pub fn run(args: &PullArgs) -> Result<()> {
     let reg = Registry::load()?;
-    let names = reg.resolve_only(&args.only, &args.profile);
+    let (names, groups) = reg.scoped(&args.only, &args.group, &args.profile, args.all)?;
     let ws = Workspace::from_registry(&reg);
-    terminal::print_pull_results(&ws.filter(&names, &args.group).pull_all());
+    let w = ws.filter(&names, &groups);
+    if !reg.is_unscoped_clone(&names, &groups, args.all) {
+        crate::commands::clone_missing_and_report(&w);
+    }
+    terminal::print_pull_results(&w.pull_all());
     Ok(())
 }
