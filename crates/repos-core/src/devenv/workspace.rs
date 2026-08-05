@@ -1,12 +1,9 @@
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::sync::Arc;
+
+use rayon::prelude::*;
 
 use super::{CheckoutTarget, Config, OpResult, Presenter, Project, Snapshot};
 use crate::registry::Registry;
-
-/// Bounds parallel git work across projects, so a batch op over ~13 repos
-/// doesn't spawn a process storm.
-const MAX_CONCURRENCY: usize = 8;
 
 /// The set of projects plus the cross-repo operations over them.
 pub struct Workspace {
@@ -57,6 +54,7 @@ impl Workspace {
                 group: r.repo.group,
                 resource: r.repo.name,
                 path: r.path,
+                url: r.repo.url,
             })
             .collect();
         Workspace::plain(cfgs)
@@ -89,93 +87,70 @@ impl Workspace {
     /// their snapshots, in workspace order. A failed fetch is recorded on the
     /// snapshot's `fetch_err` without blanking the (still-valid) local status.
     pub fn status_all(&self, fetch: bool) -> Vec<Snapshot> {
-        map_concurrent(&self.projects, |p| {
-            let fetch_err = if fetch {
-                p.fetch().err().map(|e| e.to_string())
-            } else {
-                None
-            };
-            let mut s = p.refresh();
-            s.fetch_err = fetch_err;
-            s
-        })
+        self.projects
+            .par_iter()
+            .map(|p| {
+                let fetch_err = if fetch {
+                    p.fetch().err().map(|e| e.to_string())
+                } else {
+                    None
+                };
+                let mut s = p.refresh();
+                s.fetch_err = fetch_err;
+                s
+            })
+            .collect()
     }
 
     /// Switches every project to `target` (default-branch fallback where absent).
     pub fn checkout_all(&self, target: &CheckoutTarget) -> Vec<OpResult> {
-        map_concurrent(&self.projects, |p| p.checkout(target))
+        self.projects
+            .par_iter()
+            .map(|p| p.checkout(target))
+            .collect()
     }
 
     /// Reports what [`checkout_all`](Self::checkout_all) would do, changing nothing.
     pub fn plan_checkout_all(&self, target: &CheckoutTarget) -> Vec<OpResult> {
-        map_concurrent(&self.projects, |p| p.plan_checkout(target))
+        self.projects
+            .par_iter()
+            .map(|p| p.plan_checkout(target))
+            .collect()
     }
 
     /// Fast-forwards every project to its upstream.
     pub fn pull_all(&self) -> Vec<OpResult> {
-        map_concurrent(&self.projects, |p| p.pull())
+        self.projects.par_iter().map(|p| p.pull()).collect()
     }
 
     /// Updates every project's remote-tracking refs, concurrently. Best-effort:
     /// errors are ignored — the operation that follows reports the real state.
     pub fn fetch_all(&self) {
-        map_concurrent(&self.projects, |p| {
+        self.projects.par_iter().for_each(|p| {
             let _ = p.fetch();
         });
     }
-}
 
-/// Maps `f` over the projects concurrently, bounded to [`MAX_CONCURRENCY`], and
-/// returns results in the original order. Uses scoped threads (git ops are
-/// blocking subprocess calls), so the library needs no async runtime.
-fn map_concurrent<T, F>(projects: &[Arc<Project>], f: F) -> Vec<T>
-where
-    T: Send,
-    F: Fn(&Arc<Project>) -> T + Sync,
-{
-    let sem = Semaphore::new(MAX_CONCURRENCY);
-    let mut out: Vec<Option<T>> = Vec::new();
-    out.resize_with(projects.len(), || None);
-    thread::scope(|scope| {
-        for (slot, p) in out.iter_mut().zip(projects.iter()) {
-            let sem = &sem;
-            let f = &f;
-            scope.spawn(move || {
-                sem.acquire();
-                let r = f(p);
-                sem.release();
-                *slot = Some(r);
-            });
-        }
-    });
-    out.into_iter()
-        .map(|o| o.expect("scoped task set its slot"))
-        .collect()
-}
-
-/// A minimal counting semaphore (std has none) for bounding the fan-out.
-struct Semaphore {
-    permits: Mutex<usize>,
-    available: Condvar,
-}
-
-impl Semaphore {
-    fn new(n: usize) -> Semaphore {
-        Semaphore {
-            permits: Mutex::new(n),
-            available: Condvar::new(),
-        }
+    /// Clones every project not yet on disk, concurrently. Already-present
+    /// projects are reported as-is, untouched.
+    pub fn clone_missing(&self) -> Vec<OpResult> {
+        self.projects
+            .par_iter()
+            .map(|p| p.clone_if_missing())
+            .collect()
     }
-    fn acquire(&self) {
-        let mut n = self.permits.lock().unwrap();
-        while *n == 0 {
-            n = self.available.wait(n).unwrap();
-        }
-        *n -= 1;
-    }
-    fn release(&self) {
-        *self.permits.lock().unwrap() += 1;
-        self.available.notify_one();
+
+    /// The name and error message of every project whose remote isn't
+    /// accessible, checked concurrently via [`Project::check_access`] —
+    /// verifying access to a profile's repos before persisting it.
+    pub fn inaccessible(&self) -> Vec<(String, String)> {
+        self.projects
+            .par_iter()
+            .filter_map(|p| match p.check_access() {
+                Ok(()) => None,
+                Err(e) => Some((p.name().to_string(), e.to_string())),
+            })
+            .collect()
     }
 }
 
@@ -193,6 +168,7 @@ mod tests {
             group: String::new(),
             resource: name.to_string(),
             path: path.to_path_buf(),
+            url: String::new(),
         }
     }
 
@@ -217,6 +193,53 @@ mod tests {
             .collect();
         assert_eq!(got["a"], Outcome::OnBranch);
         assert_eq!(got["b"], Outcome::FellBack);
+    }
+
+    #[test]
+    fn clone_missing_clones_absent_and_leaves_present_projects_alone() {
+        gittest::isolate();
+        let seed = gittest::init_repo();
+        let origin = gittest::clone_bare(seed.path());
+        let dest = tempfile::TempDir::new().unwrap();
+        let absent_path = dest.path().join("absent");
+        let already = gittest::init_repo();
+
+        let mut absent_cfg = config("absent", &absent_path);
+        absent_cfg.url = origin.path().to_string_lossy().into_owned();
+        let ws = Workspace::plain(vec![absent_cfg, config("already", already.path())]);
+
+        let results = ws.clone_missing();
+        let got: HashMap<&str, Outcome> = results
+            .iter()
+            .map(|r| (r.name.as_str(), r.outcome))
+            .collect();
+        assert_eq!(got["absent"], Outcome::Cloned);
+        assert_eq!(got["already"], Outcome::AlreadyPresent);
+        assert!(
+            crate::git::is_repo(&absent_path),
+            "clone should have left a working tree on disk"
+        );
+    }
+
+    #[test]
+    fn inaccessible_reports_only_unreachable_projects_not_already_present() {
+        gittest::isolate();
+        let seed = gittest::init_repo();
+        let origin = gittest::clone_bare(seed.path());
+        let dest = tempfile::TempDir::new().unwrap();
+        let already = gittest::init_repo();
+
+        let mut reachable = config("reachable", &dest.path().join("reachable"));
+        reachable.url = origin.path().to_string_lossy().into_owned();
+        let mut unreachable = config("unreachable", &dest.path().join("unreachable"));
+        unreachable.url = "/no/such/remote".to_string();
+        let mut already_cfg = config("already", already.path());
+        already_cfg.url = "/no/such/remote".to_string();
+
+        let ws = Workspace::plain(vec![reachable, unreachable, already_cfg]);
+        let inaccessible = ws.inaccessible();
+        let names: Vec<&str> = inaccessible.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["unreachable"]);
     }
 
     #[test]

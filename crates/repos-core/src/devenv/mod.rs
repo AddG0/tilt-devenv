@@ -18,13 +18,15 @@ pub use workspace::Workspace;
 use std::path::PathBuf;
 
 /// Identifies a project: its registry name and group, the Tilt resource that
-/// represents it (defaults to the name outside Tilt), and its on-disk path.
+/// represents it (defaults to the name outside Tilt), its on-disk path, and
+/// its remote url (for `clone_if_missing`; empty when a consumer never clones).
 #[derive(Debug, Clone)]
 pub struct Config {
     pub name: String,
     pub group: String,
     pub resource: String,
     pub path: PathBuf,
+    pub url: String,
 }
 
 /// The current information about a project — a value object copied out from
@@ -71,6 +73,12 @@ pub enum Outcome {
     Pulled,
     /// Already level with upstream.
     UpToDate,
+    /// Cloned from the remote.
+    Cloned,
+    /// Already on disk; not cloned again.
+    AlreadyPresent,
+    /// Clone refused by the remote — no access, not a bug.
+    AccessDenied,
 }
 
 impl Outcome {
@@ -84,6 +92,9 @@ impl Outcome {
             Outcome::Errored => "error",
             Outcome::Pulled => "pulled",
             Outcome::UpToDate => "up-to-date",
+            Outcome::Cloned => "cloned",
+            Outcome::AlreadyPresent => "already-present",
+            Outcome::AccessDenied => "access-denied",
         }
     }
 }

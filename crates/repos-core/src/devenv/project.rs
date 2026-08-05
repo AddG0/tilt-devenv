@@ -203,6 +203,45 @@ impl Project {
         res
     }
 
+    /// Clones the project from `self.cfg.url` if it isn't already a working
+    /// tree on disk. Refreshes after a real clone; an already-present repo is
+    /// reported as such, untouched. Named to avoid colliding with `Clone`
+    /// (`Arc<Project>::clone()` must keep cloning the pointer).
+    pub fn clone_if_missing(&self) -> OpResult {
+        let name = &self.cfg.name;
+        if git::is_repo(&self.cfg.path) {
+            return OpResult {
+                outcome: Outcome::AlreadyPresent,
+                ..OpResult::new(name)
+            };
+        }
+        match git::clone(&self.cfg.url, &self.cfg.path) {
+            Ok(()) => {
+                self.refresh();
+                OpResult {
+                    outcome: Outcome::Cloned,
+                    ..OpResult::new(name)
+                }
+            }
+            Err(e @ git::Error::AccessDenied(_)) => OpResult {
+                outcome: Outcome::AccessDenied,
+                err: Some(e.to_string()),
+                ..OpResult::new(name)
+            },
+            Err(e) => OpResult::errored(name, e),
+        }
+    }
+
+    /// Whether the project's remote is reachable and permitted, checked via a
+    /// lightweight `git ls-remote` rather than a clone. Skipped (`Ok`) when
+    /// already on disk — already having it is already-proven access.
+    pub fn check_access(&self) -> anyhow::Result<()> {
+        if git::is_repo(&self.cfg.path) {
+            return Ok(());
+        }
+        git::can_access(&self.cfg.url).map_err(Into::into)
+    }
+
     /// Updates remote-tracking refs, returning any error (local status stays
     /// valid regardless). Callers refresh separately.
     pub fn fetch(&self) -> anyhow::Result<()> {
@@ -319,6 +358,7 @@ mod tests {
             group: String::new(),
             resource: name.to_string(),
             path: path.to_path_buf(),
+            url: String::new(),
         }
     }
 
@@ -459,6 +499,57 @@ mod tests {
         gittest::write(dirty.path(), "wip.txt", "x\n");
         let r = Project::new(config("dirty", dirty.path()), None).pull();
         assert_eq!(r.outcome, Outcome::SkippedDirty);
+    }
+
+    #[test]
+    fn clone_if_missing_errors_for_an_unreachable_url() {
+        gittest::isolate();
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut cfg = config("bad", &dest.path().join("bad"));
+        cfg.url = "/no/such/remote".to_string();
+
+        let r = Project::new(cfg, None).clone_if_missing();
+        assert_eq!(r.outcome, Outcome::Errored);
+        assert!(r.err.is_some());
+    }
+
+    #[test]
+    fn check_access_succeeds_for_a_reachable_remote_without_cloning_it() {
+        gittest::isolate();
+        let seed = gittest::init_repo();
+        let origin = gittest::clone_bare(seed.path());
+        let dest = tempfile::TempDir::new().unwrap();
+        let target = dest.path().join("not-yet-cloned");
+        let mut cfg = config("r", &target);
+        cfg.url = origin.path().to_string_lossy().into_owned();
+
+        Project::new(cfg, None).check_access().unwrap();
+        assert!(
+            !git::is_repo(&target),
+            "check_access must not clone anything"
+        );
+    }
+
+    #[test]
+    fn check_access_skips_the_network_check_when_already_present() {
+        gittest::isolate();
+        let dir = gittest::init_repo();
+        let mut cfg = config("r", dir.path());
+        cfg.url = "/no/such/remote".to_string();
+
+        Project::new(cfg, None)
+            .check_access()
+            .expect("already on disk, so the (bad) url is never consulted");
+    }
+
+    #[test]
+    fn check_access_errors_for_an_unreachable_remote() {
+        gittest::isolate();
+        let dest = tempfile::TempDir::new().unwrap();
+        let mut cfg = config("r", &dest.path().join("missing"));
+        cfg.url = "/no/such/remote".to_string();
+
+        assert!(Project::new(cfg, None).check_access().is_err());
     }
 
     #[test]

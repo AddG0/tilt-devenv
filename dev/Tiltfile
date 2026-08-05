@@ -1,6 +1,6 @@
-# Development harness for tilt-devenv itself — repos-branches runs
-# `cargo run -p repos-tiltd` from source (rebuilt + restarted on crate
-# changes), instead of the Nix-packaged binary examples/Tiltfile uses.
+# Development harness for tilt-devenv itself — every `repos` / `repos-tiltd`
+# invocation runs from source via `cargo run` (rebuilt + restarted on crate
+# changes), instead of the Nix-packaged binaries examples/Tiltfile uses.
 # `just dev` runs this.
 #
 #   ./bootstrap.sh    # create local demo repos + tilt-devenv.json (offline)
@@ -17,6 +17,11 @@ load('ext://uibutton', 'cmd_button')
 
 _root = os.path.abspath('..')
 
+# Source builds for the whole Tiltfile — the load-time CLI calls too, not just the
+# long-lived resources.
+os.putenv('REPOS_BIN', 'cargo run --manifest-path %s/Cargo.toml -p repos --' % _root)
+os.putenv('REPOS_TILTD_BIN', 'cargo run --manifest-path %s/Cargo.toml -p repos-tiltd' % _root)
+
 profiles = repos_profiles_load()
 active = repos_active_profiles()
 repos = repos_load()
@@ -27,8 +32,6 @@ repos_status_ui(
     {name: name for name in enabled},
     repos,
     labels=['repos'],
-    serve_cmd='cargo run --manifest-path %s/Cargo.toml -p repos-tiltd' % _root,
-    status_serve_cmd='cargo run --manifest-path %s/Cargo.toml -p repos -- status --watch' % _root,
     deps=['%s/crates' % _root],
 )
 

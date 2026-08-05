@@ -24,6 +24,7 @@ fn main() -> ExitCode {
 
     let cli = cli::Cli::parse();
     let result = match &cli.command {
+        cli::Command::Clone(a) => commands::clone::run(a),
         cli::Command::Status(a) => commands::status::run(a),
         cli::Command::Checkout(a) => commands::checkout::run(a),
         cli::Command::Pull(a) => commands::pull::run(a),
