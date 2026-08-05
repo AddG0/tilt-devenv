@@ -4,6 +4,8 @@
 pub mod checkout;
 pub mod list;
 pub mod logs;
+pub mod profile;
+pub mod profiles;
 pub mod pull;
 pub mod status;
 pub mod worktree;

@@ -3,6 +3,7 @@
 //! checkout-all — handles their clicks in-process, and triggers the `git-status`
 //! resource to reprint its status table whenever a repo's git state changes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use serde::Deserialize;
 use tokio::signal::unix::{SignalKind, signal};
 
 use repos_core::devenv::{CheckoutTarget, Config, Outcome, Project, Workspace, count_with_outcome};
+use repos_core::registry::Registry;
 use repos_core::tilt::{self as client, Click};
 use repos_core::{git, registry, worktree};
 
@@ -138,7 +140,27 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
         }
         watched.push((common, p.clone()));
     }
-    render_global();
+    // Dev-env registry, for reverting a repo to its main checkout when its
+    // selected worktree is removed, and for the profile-switcher button's
+    // choices (best-effort — no reconciliation if it can't be found).
+    let reg = Registry::load()
+        .inspect_err(|e| tracing::warn!(error = %e, "loading registry failed; no worktree-revert or profile button"))
+        .ok();
+    let root = reg.as_ref().map(|r| r.root.clone());
+    let profile_names: Vec<String> = reg
+        .map(|r| r.profiles.into_keys().collect())
+        .unwrap_or_default();
+    // The developer's persisted selection (XDG state, survives a `tilt up`
+    // restart) — the profile button's checkbox defaults, and where a click
+    // saves a new selection.
+    let profile_state = repos_core::profile::state_path();
+    let active_profiles = root
+        .as_deref()
+        .zip(profile_state.as_deref())
+        .map(|(root, state)| repos_core::profile::active(state, root))
+        .unwrap_or_default();
+
+    render_global(&profile_names, &active_profiles);
     trigger_status();
 
     // Button clicks. If watching fails, keep serving status: the sender is held
@@ -156,11 +178,13 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
 
     let debouncer = Debouncer::new(Duration::from_millis(300));
-    // Dev-env root, for reverting a repo to its main checkout when its selected
-    // worktree is removed (best-effort — no reconciliation if it can't be found).
-    let root = registry::find_root().ok();
 
-    tracing::info!(repos = ws.projects().len(), "watching for branch changes");
+    tracing::info!(
+        repos = ws.projects().len(),
+        profiles = ?profile_names,
+        active = ?active_profiles,
+        "watching for branch changes"
+    );
 
     loop {
         tokio::select! {
@@ -208,7 +232,7 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
                 }
             }
 
-            Some(click) = click_rx.recv() => handle_click(&ws, click),
+            Some(click) = click_rx.recv() => handle_click(&ws, click, root.clone(), profile_state.clone()),
         }
     }
 
@@ -222,6 +246,7 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
             let _ = p.retire();
         }
         let _ = buttons::remove_checkout_all();
+        let _ = buttons::remove_profile_button();
     })
     .await;
     Ok(())
@@ -229,13 +254,28 @@ async fn run_daemon(cfgs: Vec<Config>) -> Result<()> {
 
 /// Dispatches a button press to the matching project's in-process operation, off
 /// the event loop (on the blocking pool) so a slow git op doesn't stall watching.
-fn handle_click(ws: &Arc<Workspace>, c: Click) {
+/// `root`/`profile_state` are only needed for a profile-switcher click.
+fn handle_click(
+    ws: &Arc<Workspace>,
+    c: Click,
+    root: Option<PathBuf>,
+    profile_state: Option<PathBuf>,
+) {
     tracing::debug!(button = %c.button, "click");
 
     let branch = c.inputs.get("branch").cloned().unwrap_or_default();
     if buttons::is_checkout_all_click(&c.button) {
         let ws = ws.clone();
         tokio::task::spawn_blocking(move || checkout_all(&ws, &branch));
+        return;
+    }
+    if buttons::is_profile_click(&c.button) {
+        let checked = checked_profiles(&c.inputs);
+        if let (Some(root), Some(state)) = (root, profile_state) {
+            tokio::task::spawn_blocking(move || switch_profile(&state, &root, &checked));
+        } else {
+            tracing::error!("no dev-env root or profile-state path; ignoring profile click");
+        }
         return;
     }
     if let Some(res) = buttons::branch_click_resource(&c.button) {
@@ -346,10 +386,38 @@ fn revert_removed_worktree(root: &Path, id: &str) {
     }
 }
 
-/// Draws the nav checkout-all button (a static text box).
-fn render_global() {
+/// Draws the nav checkout-all button (a static text box), plus the
+/// profile-switcher button when `profile_names` is non-empty — its checkboxes
+/// default to `active_profiles`, the persisted selection.
+fn render_global(profile_names: &[String], active_profiles: &[String]) {
     if let Err(e) = buttons::render_checkout_all() {
         tracing::error!(error = %e, "failed to render checkout-all button");
+    }
+    if !profile_names.is_empty()
+        && let Err(e) = buttons::render_profile_button(profile_names, active_profiles)
+    {
+        tracing::error!(error = %e, "failed to render profile button");
+    }
+}
+
+/// The names of the profile-button's checked checkboxes, from a click's raw
+/// input values (`"true"`/`"false"`, per [`repos_core::tilt`]'s bool encoding).
+fn checked_profiles(inputs: &HashMap<String, String>) -> Vec<String> {
+    inputs
+        .iter()
+        .filter(|(_, v)| v.as_str() == "true")
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Persists `checked` as the active profile selection (empty enables every
+/// profile). The Tiltfile watches this file, so saving it triggers the reload
+/// that redefines resources for the new selection — no `tilt args` involved, so
+/// it survives a `tilt up` restart.
+fn switch_profile(state: &Path, root: &Path, checked: &[String]) {
+    match repos_core::profile::set_active(state, root, checked) {
+        Ok(()) => tracing::info!(profiles = ?checked, "profile selection saved"),
+        Err(e) => tracing::error!(error = %e, "saving profile selection failed"),
     }
 }
 
@@ -395,6 +463,21 @@ mod tests {
 
     fn git_path(name: &str) -> PathBuf {
         PathBuf::from("/repo/.git").join(name)
+    }
+
+    #[test]
+    fn checked_profiles_keeps_only_true_valued_inputs() {
+        let inputs = HashMap::from([
+            ("frontend".to_string(), "true".to_string()),
+            ("backend".to_string(), "false".to_string()),
+        ]);
+        assert_eq!(checked_profiles(&inputs), vec!["frontend".to_string()]);
+    }
+
+    #[test]
+    fn checked_profiles_is_empty_when_nothing_is_checked() {
+        let inputs = HashMap::from([("frontend".to_string(), "false".to_string())]);
+        assert!(checked_profiles(&inputs).is_empty());
     }
 
     #[test]

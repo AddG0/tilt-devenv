@@ -28,6 +28,8 @@ fn main() -> ExitCode {
         cli::Command::Checkout(a) => commands::checkout::run(a),
         cli::Command::Pull(a) => commands::pull::run(a),
         cli::Command::List(a) => commands::list::run(a),
+        cli::Command::Profiles(a) => commands::profiles::run(a),
+        cli::Command::Profile(a) => commands::profile::run(a),
         cli::Command::Logs(a) => commands::logs::run(a),
         cli::Command::Worktree(a) => commands::worktree::run(a),
     };

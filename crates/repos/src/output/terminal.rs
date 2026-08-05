@@ -2,6 +2,7 @@
 //! ahead/behind sync indicator, the checkout/pull result lines, and the aligned
 //! tables. Formats `repos_core` value objects for a person reading a terminal.
 
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 
 use comfy_table::presets::{ASCII_FULL_CONDENSED, UTF8_FULL_CONDENSED};
@@ -327,6 +328,17 @@ pub fn print_list_table(repos: &[Resolved]) {
             t.add_row(cells.into_iter().map(|c| zebra(c, striped)));
             row += 1;
         }
+    }
+    println!("{t}");
+}
+
+/// Renders every named profile and the repos/groups it enables as a table.
+pub fn print_profiles_table(profiles: &BTreeMap<String, Vec<String>>) {
+    let unicode = std::io::stdout().is_terminal();
+    let color = color_enabled();
+    let mut t = new_table(&["PROFILE", "ENABLES"], unicode, color);
+    for (name, members) in profiles {
+        t.add_row([Cell::new(name), Cell::new(members.join(", "))]);
     }
     println!("{t}");
 }

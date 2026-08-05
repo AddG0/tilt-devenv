@@ -16,7 +16,9 @@ fn fixture(repos_json: &str) -> TempDir {
 
 fn repos(root: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("repos").unwrap();
-    cmd.env("REPOS_ROOT", root.path()).env("NO_COLOR", "1");
+    cmd.env("REPOS_ROOT", root.path())
+        .env("XDG_STATE_HOME", root.path().join(".state"))
+        .env("NO_COLOR", "1");
     cmd
 }
 
@@ -78,6 +80,147 @@ fn status_json_omits_empty_fields_for_an_uncloned_repo() {
             "{absent} should be omitted when empty"
         );
     }
+}
+
+#[test]
+fn profiles_json_has_the_expected_shape() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"},{"name":"auth","url":"u","group":"backend"}],
+            "profiles":{"frontend":["frontend"],"backend":["auth"]}}"#,
+    );
+    let out = repos(&root).args(["profiles", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["frontend"], serde_json::json!(["frontend"]));
+    assert_eq!(v["backend"], serde_json::json!(["auth"]));
+}
+
+#[test]
+fn status_profile_flag_restricts_to_the_profiles_repos() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"},{"name":"auth","url":"u","group":"backend"}],
+            "profiles":{"frontend":["frontend"]}}"#,
+    );
+    let out = repos(&root)
+        .args(["status", "--profile=frontend", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["web"], "only the frontend profile's repo");
+}
+
+#[test]
+fn checkout_profile_flag_restricts_to_the_profiles_repos() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"},{"name":"auth","url":"u","group":"backend"}],
+            "profiles":{"frontend":["frontend"]}}"#,
+    );
+    let out = repos(&root)
+        .args(["checkout", "default", "--profile=frontend", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("web"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("auth"),
+        "auth excluded by --profile; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn checkout_only_and_profile_flags_union() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"},{"name":"auth","url":"u","group":"backend"},{"name":"billing","url":"u","group":"backend"}],
+            "profiles":{"frontend":["frontend"]}}"#,
+    );
+    let out = repos(&root)
+        .args([
+            "checkout",
+            "default",
+            "--only=auth",
+            "--profile=frontend",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("web"), "from --profile; stdout: {stdout}");
+    assert!(stdout.contains("auth"), "from --only; stdout: {stdout}");
+    assert!(
+        !stdout.contains("billing"),
+        "matches neither; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn pull_profile_flag_restricts_to_the_profiles_repos() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"},{"name":"auth","url":"u","group":"backend"}],
+            "profiles":{"frontend":["frontend"]}}"#,
+    );
+    let out = repos(&root)
+        .args(["pull", "--profile=frontend"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("web"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("auth"),
+        "auth excluded by --profile; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn profile_active_persists_across_invocations_and_clears() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"}],
+            "profiles":{"frontend":["web"],"backend":["auth"]}}"#,
+    );
+
+    let out = repos(&root)
+        .args(["profile", "active", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+        serde_json::json!([]),
+        "nothing set yet"
+    );
+
+    repos(&root)
+        .args(["profile", "set", "frontend,backend"])
+        .assert()
+        .success();
+    let out = repos(&root)
+        .args(["profile", "active", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+        serde_json::json!(["frontend", "backend"]),
+        "persisted across the two separate `repos` invocations"
+    );
+
+    repos(&root).args(["profile", "set"]).assert().success();
+    let out = repos(&root)
+        .args(["profile", "active", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+        serde_json::json!([]),
+        "`profile set` with nothing clears back to every profile enabled"
+    );
 }
 
 #[test]

@@ -6,6 +6,10 @@
 #                      # from source (rebuilt + restarted on crate changes)
 #                      # instead of the Nix-packaged binary
 #
+# Two profiles are defined in tilt-devenv.json (alpha-only, beta-only) — try
+# `repos profile set alpha-only` (or the daemon's nav "apply profiles" button)
+# to see the other repo's resources disappear.
+#
 # This demo is local-only (no Kubernetes); allow whatever kube context is
 # active so Tilt's production-context guard doesn't block the local() calls.
 allow_k8s_contexts(k8s_context())
@@ -13,27 +17,31 @@ allow_k8s_contexts(k8s_context())
 # Real consumers load the extension via ext:// (see the top-level README). Here
 # we load it by relative path so the example tracks the extension source
 # directly with no clone/cache step.
-load('../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_link')
+load('../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_link',
+     'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled')
 
 config.define_bool('dev', usage='Run repos-tiltd via `cargo run` from source, rebuilding and restarting on crate changes.')
 dev = config.parse().get('dev', False)
 root = os.path.abspath('..')
 
+profiles = repos_profiles_load()
+active = repos_active_profiles()
 repos = repos_load()
+enabled = {name: r for name, r in repos.items() if repos_profile_enabled(r, profiles, active)}
 
 # Resource name == repo name here, so the mapping is identity.
 repos_status_ui(
-    {name: name for name in repos},
+    {name: name for name in enabled},
     repos,
     labels=['repos'],
     serve_cmd='cargo run --manifest-path %s/Cargo.toml -p repos-tiltd' % root if dev else 'repos-tiltd',
     deps=['%s/crates' % root] if dev else [],
 )
 
-# A stand-in "service" per repo, just so the branch buttons have a resource to
-# attach to.
-for name in repos:
-    r = repos[name]
+# A stand-in "service" per enabled repo, just so the branch buttons have a
+# resource to attach to.
+for name in enabled:
+    r = enabled[name]
     local_resource(
         name,
         cmd='echo "%s @ %s" && git -C %s branch --show-current' % (name, r.path, r.path),

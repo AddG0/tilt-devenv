@@ -2,7 +2,7 @@
 
 Manage a multi-repo dev environment as one unit, live in the [Tilt](https://tilt.dev) UI — cross-repo git branches and worktrees.
 
-Two pieces: a Rust tool (`repos` CLI + `repos-tiltd` daemon) and a Tilt extension (`tilt/Tiltfile`) that surfaces it as live UI — a branch picker, pull button, and worktree picker per resource, a global checkout-all, and an auto-refreshing status table. Org-neutral: you supply `tilt-devenv.json` and the resource mapping.
+Two pieces: a Rust tool (`repos` CLI + `repos-tiltd` daemon) and a Tilt extension (`tilt/Tiltfile`) that surfaces it as live UI — a branch picker, pull button, and worktree picker per resource, a global checkout-all, an auto-refreshing status table, and (when `tilt-devenv.json` defines any) a profile switcher: check any number of profiles and click to enable just their repos, live, no restart. Org-neutral: you supply `tilt-devenv.json` and the resource mapping.
 
 ## Use it
 
@@ -28,6 +28,15 @@ Non-Nix: `cargo install --path crates/repos --path crates/repos-tiltd`.
 
 Path resolution: `tilt_config.json` override > `ghq` checkout > sibling dir. See `repos --help`.
 
+Optionally, wrap the array in `{"repos": [...], "profiles": {...}}` to name profiles — a
+profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`. Use them
+via `repos --profile=frontend` (a one-off filter on `status`/`checkout`/`pull`), `repos
+profiles` to list them, or as a *persisted* selection (survives a `tilt up` restart, XDG
+state) via `repos profile set frontend,backend` or the daemon's nav "apply profiles"
+button — a checkbox per profile; check any number and click to save (unchecking every box
+re-enables all of them). `repos profile active` reads the current selection; the Tiltfile
+extension exposes it via `repos_active_profiles()`/`repos_profile_enabled()` (see below).
+
 **3. Load the extension** in your Tiltfile:
 
 ```python
@@ -50,6 +59,9 @@ Local plugin dev: point `extension_repo` at `url='file:///abs/path/to/tilt-deven
 | `repos_status_ui(branch_resources, repos, status_links=[], rust_log=…, serve_cmd='repos-tiltd', deps=[], labels=None)` | `repos-branches` daemon + `git-status` table. |
 | `repos_browse_url(remote)` | git remote (scp/ssh/https) → browsable `https://host/path`. |
 | `repos_link(remote, label='Repo')` | Tilt `link` to that URL. |
+| `repos_profiles_load()` | Resolve `tilt-devenv.json`'s `profiles` → `{name: [repo-or-group, ...]}`. |
+| `repos_active_profiles()` | The persisted active profile selection (empty = every profile enabled); watches it for changes. |
+| `repos_profile_enabled(repo, profiles, active)` | Whether `repo` belongs to any of `active` profiles (or `active` is empty). |
 
 ## Demo
 

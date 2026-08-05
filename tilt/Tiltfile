@@ -10,6 +10,18 @@
 #     repos = repos_load()
 #     repos_status_ui({'my-service': 'my-service-repo'}, repos)
 #
+# To gate resources behind a named profile (`tilt-devenv.json`'s `profiles` key,
+# also usable via `repos --profile`), additionally load `repos_profiles_load`,
+# `repos_active_profiles`, `repos_profile_enabled`. The active selection is
+# persisted (XDG state, survives a `tilt up` restart) — set it from the
+# daemon's nav "apply profiles" button or `repos profile set`:
+#
+#     profiles = repos_profiles_load()
+#     active = repos_active_profiles()
+#     for name, r in repos.items():
+#         if repos_profile_enabled(r, profiles, active):
+#             k8s_resource(name, labels=[r.group])
+#
 # Requires the `repos` and `repos-tiltd` binaries on PATH (ship them via the
 # tool's Nix flake, or `cargo install --path crates/repos --path crates/repos-tiltd`).
 #
@@ -51,6 +63,40 @@ def _make_repo(r, clone_missing):
         path=path,
         present=os.path.exists(os.path.join(path, '.git')),
     )
+
+def repos_profiles_load():
+    """Resolve every profile via `repos profiles --json` and return a dict:
+    {profile_name: [repo-or-group name, ...]}, per `tilt-devenv.json`'s
+    `profiles` key."""
+    return decode_json(str(local(
+        'repos profiles --json',
+        quiet=True,
+        echo_off=True,
+    )))
+
+def repos_active_profiles():
+    """The developer's persisted active profile selection (a list; empty means
+    every profile enabled) — set via the daemon's nav "apply profiles" button or
+    `repos profile set`. Watches the selection's state file, so picking a
+    profile reloads the Tiltfile and redefines resources to match."""
+    watch_file(str(local('repos profile state-path', quiet=True, echo_off=True)).strip())
+    return decode_json(str(local(
+        'repos profile active --json',
+        quiet=True,
+        echo_off=True,
+    )))
+
+def repos_profile_enabled(repo, profiles, active):
+    """True if `repo` (a `repos_load()` struct — `.name`, `.group`) belongs to
+    any of `active` profiles, per `profiles` (profile name -> repo/group names,
+    from `repos_profiles_load()`). An empty `active` means every profile is
+    enabled."""
+    if not active:
+        return True
+    return any([
+        repo.name in profiles.get(p, []) or repo.group in profiles.get(p, [])
+        for p in active
+    ])
 
 def repos_browse_url(remote):
     """Turn a git remote — scp-SSH (`git@host:path`), `ssh://host/path`, or

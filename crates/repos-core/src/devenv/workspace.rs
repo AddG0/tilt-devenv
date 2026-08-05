@@ -43,7 +43,12 @@ impl Workspace {
     /// Builds a presenter-less Workspace from the shared registry (CLI use). The
     /// Tilt resource defaults to the repo name.
     pub fn load() -> anyhow::Result<Workspace> {
-        let reg = Registry::load()?;
+        Ok(Workspace::from_registry(&Registry::load()?))
+    }
+
+    /// Like [`load`](Self::load), from an already-loaded registry — for callers
+    /// that also need the registry itself (e.g. to expand `--profile`).
+    pub fn from_registry(reg: &Registry) -> Workspace {
         let cfgs = reg
             .resolve()
             .into_iter()
@@ -54,7 +59,7 @@ impl Workspace {
                 path: r.path,
             })
             .collect();
-        Ok(Workspace::plain(cfgs))
+        Workspace::plain(cfgs)
     }
 
     pub fn projects(&self) -> &[Arc<Project>] {

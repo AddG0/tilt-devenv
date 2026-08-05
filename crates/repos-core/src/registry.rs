@@ -5,7 +5,7 @@
 //! This is the base the CLI builds on: it answers "which repos exist, and where
 //! do they live on this machine".
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -31,6 +31,10 @@ struct RegistryConfig {
     #[serde(default)]
     workspace: String,
     repos: Vec<Repo>,
+    /// Named sets of repos (Tilt profiles / `repos --profile`): profile name ->
+    /// the repo or group names it enables.
+    #[serde(default)]
+    profiles: BTreeMap<String, Vec<String>>,
 }
 
 /// The `tilt-devenv.json` file: the object form, or a bare `[...]` array of repos
@@ -48,6 +52,7 @@ impl RegistryFile {
             RegistryFile::Bare(repos) => RegistryConfig {
                 workspace: String::new(),
                 repos,
+                profiles: BTreeMap::new(),
             },
             RegistryFile::Config(cfg) => cfg,
         }
@@ -70,6 +75,8 @@ pub struct Registry {
     /// Directory containing `tilt-devenv.json` (the dev-env repo root).
     pub root: PathBuf,
     pub repos: Vec<Repo>,
+    /// Profile name -> the repo or group names it enables.
+    pub profiles: BTreeMap<String, Vec<String>>,
     /// Base dir for the sibling layout.
     workspace: PathBuf,
     /// Repo name -> explicit path override.
@@ -98,6 +105,7 @@ impl Registry {
         let mut reg = Registry {
             root: root.to_path_buf(),
             repos: cfg.repos,
+            profiles: cfg.profiles,
             workspace: root.to_path_buf(),
             overrides: HashMap::new(),
             worktrees: HashMap::new(),
@@ -156,6 +164,40 @@ impl Registry {
             }
         }
         Ok(())
+    }
+
+    /// Resolves `profiles` (registry profile names) to the repo names they
+    /// enable — a profile member names a repo directly, or a group (expanded to
+    /// every repo in it). An unknown profile or member contributes nothing.
+    fn expand_profiles(&self, profiles: &[String]) -> Vec<String> {
+        profiles
+            .iter()
+            .filter_map(|p| self.profiles.get(p))
+            .flatten()
+            .flat_map(|member| {
+                let group_members: Vec<String> = self
+                    .repos
+                    .iter()
+                    .filter(|r| r.group == *member)
+                    .map(|r| r.name.clone())
+                    .collect();
+                if group_members.is_empty() {
+                    vec![member.clone()]
+                } else {
+                    group_members
+                }
+            })
+            .collect()
+    }
+
+    /// `only`, unioned with the repo names `profiles` resolve to — the combined
+    /// name filter for [`Workspace::filter`](crate::devenv::Workspace::filter).
+    /// Pass `only: &[]` for a caller with no `--only` flag of its own.
+    pub fn resolve_only(&self, only: &[String], profiles: &[String]) -> Vec<String> {
+        only.iter()
+            .cloned()
+            .chain(self.expand_profiles(profiles))
+            .collect()
     }
 
     /// Computes the on-disk path for every repo. Priority matches the Tiltfile:
@@ -437,6 +479,81 @@ mod tests {
     }
 
     #[test]
+    fn profiles_parse_from_the_object_form() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"u","group":"g"}],"profiles":{"frontend":["foo"]}}"#,
+        );
+
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(reg.profiles.get("frontend"), Some(&vec!["foo".to_string()]));
+    }
+
+    #[test]
+    fn expand_profiles_resolves_a_repo_name_member_directly() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"u","group":"g"},{"name":"bar","url":"u","group":"g"}],
+                "profiles":{"just-foo":["foo"]}}"#,
+        );
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(
+            reg.expand_profiles(&["just-foo".to_string()]),
+            vec!["foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn expand_profiles_resolves_a_group_name_member_to_its_repos() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"u","group":"frontend"},{"name":"bar","url":"u","group":"backend"}],
+                "profiles":{"fe":["frontend"]}}"#,
+        );
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(
+            reg.expand_profiles(&["fe".to_string()]),
+            vec!["foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn expand_profiles_ignores_an_unknown_profile() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"[{"name":"foo","url":"u","group":"g"}]"#,
+        );
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(
+            reg.expand_profiles(&["nonexistent".to_string()]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn resolve_only_unions_only_with_expanded_profiles() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"u","group":"g"},{"name":"bar","url":"u","group":"g"},{"name":"baz","url":"u","group":"g"}],
+                "profiles":{"p":["bar"]}}"#,
+        );
+        let reg = Registry::load_from(root.path()).unwrap();
+        let mut got = reg.resolve_only(&["foo".to_string()], &["p".to_string()]);
+        got.sort();
+        assert_eq!(got, vec!["bar".to_string(), "foo".to_string()]);
+    }
+
+    #[test]
     fn tilt_config_workspace_overrides_repos_json_workspace() {
         let root = TempDir::new().unwrap();
         write_file(
@@ -508,6 +625,7 @@ mod tests {
         let mut reg = Registry {
             root: dir.path().to_path_buf(),
             repos: Vec::new(),
+            profiles: BTreeMap::new(),
             workspace: dir.path().to_path_buf(),
             overrides: HashMap::new(),
             worktrees: HashMap::new(),

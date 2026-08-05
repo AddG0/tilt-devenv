@@ -6,6 +6,8 @@
 //!   path, mirroring the Tiltfile's resolution rules.
 //! - [`worktree`] — the developer's active per-repo worktree selection (XDG
 //!   state), the top-priority input to path resolution.
+//! - [`profile`] — the developer's active profile selection (XDG state),
+//!   persisted the same way as the worktree selection.
 //! - [`devenv`] — the domain: a [`devenv::Project`] aggregate (one checkout with
 //!   its live state + operations), a [`devenv::Workspace`] collection, and a
 //!   [`devenv::Presenter`] port that adapters (e.g. the daemon's Tilt button
@@ -15,6 +17,7 @@
 
 pub mod devenv;
 pub mod git;
+pub mod profile;
 pub mod registry;
 pub mod tilt;
 pub mod worktree;
