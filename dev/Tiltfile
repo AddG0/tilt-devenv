@@ -1,21 +1,20 @@
-# Demo of the `repos` Tilt extension, runnable in isolation.
+# Development harness for tilt-devenv itself — repos-branches runs
+# `cargo run -p repos-tiltd` from source (rebuilt + restarted on crate
+# changes), instead of the Nix-packaged binary examples/Tiltfile uses.
+# `just dev` runs this.
 #
 #   ./bootstrap.sh    # create local demo repos + tilt-devenv.json (offline)
-#   tilt up           # from inside `nix develop` (provides `repos` + `tilt`)
+#   just dev           # from the repo root, inside `nix develop`
 #
-# Two profiles are defined in tilt-devenv.json (alpha-only, beta-only) — try
-# `repos profile set alpha-only` (or the daemon's nav "profiles" button)
-# to see the other repo's resources disappear.
-#
-# This demo is local-only (no Kubernetes); allow whatever kube context is
-# active so Tilt's production-context guard doesn't block the local() calls.
+# Deliberately independent of examples/ (its own bootstrap.sh, tilt-devenv.json,
+# Tiltfile) — examples/ stays a clean reference for real consumers, with
+# nothing here coupled into it.
 allow_k8s_contexts(k8s_context())
 
-# Real consumers load the extension via ext:// (see the top-level README). Here
-# we load it by relative path so the example tracks the extension source
-# directly with no clone/cache step.
 load('../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_link',
      'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled')
+
+_root = os.path.abspath('..')
 
 profiles = repos_profiles_load()
 active = repos_active_profiles()
@@ -27,6 +26,8 @@ repos_status_ui(
     {name: name for name in enabled},
     repos,
     labels=['repos'],
+    serve_cmd='cargo run --manifest-path %s/Cargo.toml -p repos-tiltd' % _root,
+    deps=['%s/crates' % _root],
 )
 
 # A stand-in "service" per enabled repo, just so the branch buttons have a

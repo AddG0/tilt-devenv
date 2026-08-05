@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Create throwaway local git repos and a tilt-devenv.json pointing at them, so the
-# example can be driven with `tilt up` fully offline — no SSH keys, no network.
-# `alpha` also gets a git worktree so its resource shows the 🌳 worktree picker.
+# Create throwaway local git repos and a tilt-devenv.json pointing at them, so
+# `just dev` can be driven fully offline — no SSH keys, no network. `alpha`
+# also gets a git worktree so its resource shows the 🌳 worktree picker.
 # Everything it writes is gitignored. Re-run any time to reset the demo.
+#
+# Independent of examples/bootstrap.sh (same idea, but examples/ stays a clean
+# reference for real consumers, uncoupled from this repo's own dev workflow).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,7 +51,7 @@ git clone -q "file://$DEMO/alpha.git" "$HERE/alpha"
 git -C "$HERE/alpha" worktree add -q -b demo-feature "$DEMO/wt/alpha-demo-feature"
 
 echo "Wrote $HERE/tilt-devenv.json and added a git worktree (demo-feature) to alpha."
-echo "Now run:  tilt up   (from $HERE)"
+echo "Now run:  just dev   (from the repo root)"
 echo "The 'alpha' resource has a 🌳 worktree picker; choosing demo-feature reloads"
 echo "and restarts it at the worktree path."
 echo "Two profiles are defined (alpha-only, beta-only) — 'repos profile set alpha-only'"

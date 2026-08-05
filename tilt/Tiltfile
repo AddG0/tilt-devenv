@@ -14,7 +14,7 @@
 # also usable via `repos --profile`), additionally load `repos_profiles_load`,
 # `repos_active_profiles`, `repos_profile_enabled`. The active selection is
 # persisted (XDG state, survives a `tilt up` restart) — set it from the
-# daemon's nav "apply profiles" button or `repos profile set`:
+# daemon's nav "profiles" button or `repos profile set`:
 #
 #     profiles = repos_profiles_load()
 #     active = repos_active_profiles()
@@ -76,7 +76,7 @@ def repos_profiles_load():
 
 def repos_active_profiles():
     """The developer's persisted active profile selection (a list; empty means
-    every profile enabled) — set via the daemon's nav "apply profiles" button or
+    every profile enabled) — set via the daemon's nav "profiles" button or
     `repos profile set`. Watches the selection's state file, so picking a
     profile reloads the Tiltfile and redefines resources to match."""
     watch_file(str(local('repos profile state-path', quiet=True, echo_off=True)).strip())
@@ -146,8 +146,7 @@ def repos_status_ui(
     the status pane (e.g. the dev-env repo's own remote). `serve_cmd` and `deps`
     default to the packaged binary; pass `serve_cmd='cargo run -p repos-tiltd'`
     and `deps=['<repo>/crates']` to run the daemon from source instead, rebuilt
-    on every restart Tilt triggers from a `deps` change (see `examples/Tiltfile`'s
-    `dev` flag)."""
+    on every restart Tilt triggers from a `deps` change (see `dev/Tiltfile`)."""
     spec = [
         {'resource': res, 'repo': repo, 'path': repos[repo].path}
         for res, repo in branch_resources.items()
