@@ -201,7 +201,7 @@ pub fn is_checkout_all_click(button: &str) -> bool {
 /// triggers the Tiltfile reload that redefines resources to match (see the
 /// daemon's click handler).
 fn profile_button(names: &[String], active: &[String]) -> UiButton {
-    let mut button = UiButton::new(PROFILE_BUTTON.to_string(), "apply profiles".to_string())
+    let mut button = UiButton::new(PROFILE_BUTTON.to_string(), "profiles".to_string())
         .icon("checklist")
         .at("nav", "Global");
     for name in names {

@@ -32,7 +32,7 @@ Optionally, wrap the array in `{"repos": [...], "profiles": {...}}` to name prof
 profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`. Use them
 via `repos --profile=frontend` (a one-off filter on `status`/`checkout`/`pull`), `repos
 profiles` to list them, or as a *persisted* selection (survives a `tilt up` restart, XDG
-state) via `repos profile set frontend,backend` or the daemon's nav "apply profiles"
+state) via `repos profile set frontend,backend` or the daemon's nav "profiles"
 button — a checkbox per profile; check any number and click to save (unchecking every box
 re-enables all of them). `repos profile active` reads the current selection; the Tiltfile
 extension exposes it via `repos_active_profiles()`/`repos_profile_enabled()` (see below).

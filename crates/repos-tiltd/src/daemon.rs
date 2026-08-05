@@ -16,7 +16,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use repos_core::devenv::{CheckoutTarget, Config, Outcome, Project, Workspace, count_with_outcome};
 use repos_core::registry::Registry;
 use repos_core::tilt::{self as client, Click};
-use repos_core::{git, registry, worktree};
+use repos_core::{git, worktree};
 
 use crate::buttons;
 use crate::debounce::Debouncer;
@@ -297,7 +297,11 @@ fn handle_click(
     {
         let p = p.clone();
         let selected = c.inputs.get("worktree").cloned().unwrap_or_default();
-        tokio::task::spawn_blocking(move || select_worktree(&p, &selected));
+        let Some(root) = root else {
+            tracing::error!("no dev-env root; ignoring worktree click");
+            return;
+        };
+        tokio::task::spawn_blocking(move || select_worktree(&p, &selected, &root));
     }
 }
 
@@ -328,7 +332,7 @@ fn pull(p: &Project) {
 /// the dropdown value; selecting the main checkout clears the selection (back to
 /// the repo's default path). The Tiltfile watches the selection file, so writing
 /// it triggers the reload that restarts the resource at the new path.
-fn select_worktree(p: &Project, branch: &str) {
+fn select_worktree(p: &Project, branch: &str, root: &Path) {
     if branch.is_empty() {
         return;
     }
@@ -336,13 +340,6 @@ fn select_worktree(p: &Project, branch: &str) {
     let Some(wt) = worktrees.iter().find(|w| w.branch == branch) else {
         tracing::warn!(repo = p.name(), %branch, "no worktree with that branch; ignoring");
         return;
-    };
-    let root = match registry::find_root() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "can't locate dev-env root to record worktree");
-            return;
-        }
     };
     let Some(state) = worktree::state_path() else {
         tracing::error!("no XDG state dir; can't record worktree selection");
@@ -361,7 +358,7 @@ fn select_worktree(p: &Project, branch: &str) {
             }
         }
     };
-    match worktree::set_selection(&state, &root, p.name(), selection.as_deref()) {
+    match worktree::set_selection(&state, root, p.name(), selection.as_deref()) {
         Ok(()) => tracing::info!(repo = p.name(), %branch, main = wt.is_main, "worktree selected"),
         Err(e) => tracing::error!(repo = p.name(), error = %e, "recording worktree failed"),
     }
