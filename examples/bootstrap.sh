@@ -29,10 +29,16 @@ make_repo alpha
 make_repo beta
 
 cat > "$HERE/tilt-devenv.json" <<EOF
-[
-  {"name": "alpha", "url": "file://$DEMO/alpha.git", "group": "demo"},
-  {"name": "beta",  "url": "file://$DEMO/beta.git",  "group": "demo"}
-]
+{
+  "repos": [
+    {"name": "alpha", "url": "file://$DEMO/alpha.git", "group": "demo"},
+    {"name": "beta",  "url": "file://$DEMO/beta.git",  "group": "demo"}
+  ],
+  "profiles": {
+    "alpha-only": ["alpha"],
+    "beta-only": ["beta"]
+  }
+}
 EOF
 
 # Pre-clone alpha and give it a git worktree at an explicit (gitignored) path, so
@@ -45,3 +51,5 @@ echo "Wrote $HERE/tilt-devenv.json and added a git worktree (demo-feature) to al
 echo "Now run:  tilt up   (from $HERE)"
 echo "The 'alpha' resource has a 🌳 worktree picker; choosing demo-feature reloads"
 echo "and restarts it at the worktree path."
+echo "Two profiles are defined (alpha-only, beta-only) — 'repos profile set alpha-only'"
+echo "(or the daemon's nav 'apply profiles' button once tilt up is running) hides beta."

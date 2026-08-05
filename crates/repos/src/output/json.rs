@@ -2,6 +2,8 @@
 //! that the Tiltfile and scripts consume — field order and skip rules are part
 //! of that contract, so keep them stable.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use repos_core::devenv::Snapshot;
 use repos_core::registry::Resolved;
@@ -62,6 +64,10 @@ pub fn print_list_json(repos: &[Resolved]) -> Result<()> {
         })
         .collect();
     print_json(&items)
+}
+
+pub fn print_profiles_json(profiles: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    print_json(profiles)
 }
 
 pub fn print_status_json(statuses: &[Snapshot]) -> Result<()> {

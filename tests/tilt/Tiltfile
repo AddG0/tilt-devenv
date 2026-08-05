@@ -11,7 +11,8 @@
 # Local-only; allow whatever kube context is active (none, in the sandbox).
 allow_k8s_contexts(k8s_context())
 
-load('../../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_browse_url', 'repos_link')
+load('../../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_browse_url', 'repos_link',
+     'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled')
 
 # Unit assertions for repos_browse_url (pure remote -> browsable URL parser).
 def _eq(got, want, msg):
@@ -38,12 +39,36 @@ _eq(repos_browse_url('https://user@github.com/acme/foo.git'),
 _l = repos_link('git@gitlab.com:acme/foo.git', 'Src')
 _eq(_l.url, 'https://gitlab.com/acme/foo', 'repos_link url')
 
+# Unit assertions for repos_profile_enabled (pure membership check).
+_pf = {'frontend': ['web', 'design-system'], 'backend': ['auth']}
+_eq(repos_profile_enabled(struct(name='web', group='ui'), _pf, ['frontend']),
+    True, 'enabled by name')
+_eq(repos_profile_enabled(struct(name='web', group='ui'), _pf, ['backend']),
+    False, 'not enabled under an unrelated profile')
+_eq(repos_profile_enabled(struct(name='other', group='ui'), _pf, ['frontend', 'backend']),
+    False, 'unlisted repo stays disabled')
+_eq(repos_profile_enabled(struct(name='web', group='ui'), {'ui-team': ['ui']}, ['ui-team']),
+    True, 'enabled by group')
+_eq(repos_profile_enabled(struct(name='other', group='ui'), _pf, []),
+    True, 'empty active means every profile enabled')
+
 # Integration: resolve the registry, clone missing repos, wire the live UI.
 repos = repos_load()
 
 # The registry the harness writes has exactly these two repos.
 if sorted(repos.keys()) != ['alpha', 'beta']:
     fail('repos_load returned %r, want [alpha, beta]' % sorted(repos.keys()))
+
+# The registry the harness writes has exactly these two profiles.
+profiles = repos_profiles_load()
+if profiles != {'alpha-only': ['alpha'], 'beta-only': ['beta']}:
+    fail('repos_profiles_load returned %r' % profiles)
+
+# Nothing has been picked yet, so the persisted selection is empty (every
+# profile active).
+active = repos_active_profiles()
+if active != []:
+    fail('repos_active_profiles default = %r, want empty (every profile active)' % active)
 
 for name in repos:
     r = repos[name]

@@ -13,6 +13,7 @@ const BRANCH_PREFIX: &str = "repos-branch-";
 const PULL_PREFIX: &str = "repos-pull-";
 const WORKTREE_PREFIX: &str = "repos-worktree-";
 const CHECKOUT_ALL_BUTTON: &str = "repos-checkout-all";
+const PROFILE_BUTTON: &str = "repos-profile";
 
 fn branch_name(resource: &str) -> String {
     format!("{BRANCH_PREFIX}{resource}")
@@ -194,6 +195,37 @@ pub fn is_checkout_all_click(button: &str) -> bool {
     button == CHECKOUT_ALL_BUTTON
 }
 
+/// The global profile-switcher button: one checkbox per named profile (from
+/// `tilt-devenv.json`'s `profiles` key), defaulted to `active` (the persisted
+/// selection) — check any number, then click to save the selection, which
+/// triggers the Tiltfile reload that redefines resources to match (see the
+/// daemon's click handler).
+fn profile_button(names: &[String], active: &[String]) -> UiButton {
+    let mut button = UiButton::new(PROFILE_BUTTON.to_string(), "apply profiles".to_string())
+        .icon("checklist")
+        .at("nav", "Global");
+    for name in names {
+        button = button.bool_input(name, name, active.contains(name));
+    }
+    button
+}
+
+/// (Re)applies the nav profile-switcher button, offering `names` defaulted to
+/// `active`.
+pub fn render_profile_button(names: &[String], active: &[String]) -> Result<()> {
+    client::apply(&profile_button(names, active))
+}
+
+/// Deletes the nav profile-switcher button.
+pub fn remove_profile_button() -> Result<()> {
+    client::delete_button(PROFILE_BUTTON)
+}
+
+/// Reports whether a click came from the nav profile-switcher button.
+pub fn is_profile_click(button: &str) -> bool {
+    button == PROFILE_BUTTON
+}
+
 /// Returns the resource a branch-button click targets.
 pub fn branch_click_resource(button: &str) -> Option<&str> {
     button.strip_prefix(BRANCH_PREFIX).filter(|r| !r.is_empty())
@@ -297,6 +329,24 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0]["name"], "branch");
         assert!(inputs[0]["text"].is_object());
+    }
+
+    #[test]
+    fn profile_button_is_a_nav_button_with_one_checkbox_per_profile() {
+        assert!(is_profile_click("repos-profile"));
+        assert!(!is_profile_click("repos-checkout-all"));
+
+        let names = ["frontend".to_string(), "backend".to_string()];
+        let v = json(&profile_button(&names, &["backend".to_string()]));
+        assert_eq!(v["metadata"]["name"], "repos-profile");
+        assert_eq!(v["spec"]["location"]["componentType"], "Global");
+        assert_eq!(v["spec"]["location"]["componentID"], "nav");
+        let inputs = v["spec"]["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0]["name"], "frontend");
+        assert_eq!(inputs[0]["bool"]["defaultValue"], false, "not in active");
+        assert_eq!(inputs[1]["name"], "backend");
+        assert_eq!(inputs[1]["bool"]["defaultValue"], true, "in active");
     }
 
     #[test]

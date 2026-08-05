@@ -41,10 +41,16 @@ for name in alpha beta; do
 done
 
 cat > "$WORK/tilt-devenv.json" <<EOF
-[
-  {"name": "alpha", "url": "file://$WORK/.bare/alpha.git", "group": "demo"},
-  {"name": "beta",  "url": "file://$WORK/.bare/beta.git",  "group": "demo"}
-]
+{
+  "repos": [
+    {"name": "alpha", "url": "file://$WORK/.bare/alpha.git", "group": "demo"},
+    {"name": "beta",  "url": "file://$WORK/.bare/beta.git",  "group": "demo"}
+  ],
+  "profiles": {
+    "alpha-only": ["alpha"],
+    "beta-only": ["beta"]
+  }
+}
 EOF
 
 # repos resolves its registry from REPOS_ROOT (and clones missing repos beside

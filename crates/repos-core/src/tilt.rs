@@ -70,6 +70,7 @@ impl UiButton {
                 placeholder: placeholder.to_string(),
             }),
             choice: None,
+            boolean: None,
         }];
         self
     }
@@ -82,7 +83,26 @@ impl UiButton {
             label: label.to_string(),
             text: None,
             choice: Some(UiChoice { choices }),
+            boolean: None,
         }];
+        self
+    }
+
+    /// Adds a checkbox input the click carries back under `name` — unlike
+    /// [`text_input`](Self::text_input)/[`choice_input`](Self::choice_input),
+    /// this appends rather than replaces, so a button can carry several (e.g.
+    /// one checkbox per option, for a multi-select the Tilt API has no native
+    /// widget for).
+    pub fn bool_input(mut self, name: &str, label: &str, default: bool) -> UiButton {
+        self.spec.inputs.push(UiInput {
+            name: name.to_string(),
+            label: label.to_string(),
+            text: None,
+            choice: None,
+            boolean: Some(UiBool {
+                default_value: default,
+            }),
+        });
         self
     }
 
@@ -129,6 +149,8 @@ struct UiInput {
     text: Option<UiText>,
     #[serde(skip_serializing_if = "Option::is_none")]
     choice: Option<UiChoice>,
+    #[serde(rename = "bool", skip_serializing_if = "Option::is_none")]
+    boolean: Option<UiBool>,
 }
 
 #[derive(Serialize)]
@@ -140,6 +162,12 @@ struct UiText {
 #[derive(Serialize)]
 struct UiChoice {
     choices: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct UiBool {
+    #[serde(rename = "defaultValue")]
+    default_value: bool,
 }
 
 /// Fails with `<what>: <status>: <stderr>` when a `tilt` invocation exited
@@ -281,11 +309,18 @@ struct WatchInput {
     text: Option<WatchValue>,
     #[serde(default)]
     choice: Option<WatchValue>,
+    #[serde(rename = "bool", default)]
+    boolean: Option<WatchBool>,
 }
 
 #[derive(Deserialize)]
 struct WatchValue {
     value: String,
+}
+
+#[derive(Deserialize)]
+struct WatchBool {
+    value: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -301,6 +336,8 @@ fn inputs_of(b: &WatchButton) -> HashMap<String, String> {
             m.insert(input.name.clone(), c.value.clone());
         } else if let Some(t) = &input.text {
             m.insert(input.name.clone(), t.value.clone());
+        } else if let Some(b) = &input.boolean {
+            m.insert(input.name.clone(), b.value.to_string());
         }
     }
     m
@@ -389,6 +426,31 @@ mod tests {
         let got = inputs_of(&b);
         assert_eq!(got["branch"], "feat/login");
         assert_eq!(got["note"], "hi");
+    }
+
+    #[test]
+    fn inputs_of_reads_bool_checkboxes() {
+        let raw = r#"{"status":{"inputs":[
+            {"name":"frontend","bool":{"value":true}},
+            {"name":"backend","bool":{"value":false}}
+        ]}}"#;
+        let b: WatchButton = serde_json::from_str(raw).unwrap();
+        let got = inputs_of(&b);
+        assert_eq!(got["frontend"], "true");
+        assert_eq!(got["backend"], "false");
+    }
+
+    #[test]
+    fn bool_input_serializes_as_a_defaultvalue_checkbox() {
+        let btn = UiButton::new("b".to_string(), "text".to_string())
+            .bool_input("frontend", "Frontend", true)
+            .bool_input("backend", "Backend", false);
+        let v = serde_json::to_value(&btn).unwrap();
+        let inputs = v["spec"]["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0]["name"], "frontend");
+        assert_eq!(inputs[0]["bool"]["defaultValue"], true);
+        assert_eq!(inputs[1]["bool"]["defaultValue"], false);
     }
 
     #[test]
