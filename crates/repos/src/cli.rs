@@ -91,6 +91,13 @@ pub struct StatusArgs {
     /// Emit JSON instead of a table
     #[arg(long)]
     pub json: bool,
+    /// Keep running and reprint the table whenever it changes, instead of
+    /// exiting (for a live pane); never fetches on its own
+    #[arg(long)]
+    pub watch: bool,
+    /// How often to check for changes, for `--watch`
+    #[arg(long, default_value = "2s", value_parser = humantime::parse_duration)]
+    pub interval: std::time::Duration,
 }
 
 #[derive(Args)]
