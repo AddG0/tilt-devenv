@@ -37,7 +37,7 @@ profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`
 *persisted* active selection (survives a `tilt up` restart, XDG state) via `repos profile
 set frontend,backend` or the daemon's nav "profiles" button — a checkbox per profile; check
 any number and click to save. `repos profile active` reads the current selection; the
-Tiltfile extension exposes it via `repos_active_profiles()`/`repos_profile_enabled()` (see
+Tiltfile extension exposes it via `repos_active_profiles()`/`repos_enabled()` (see
 below) — with profiles defined, nothing is enabled until one is picked, so a fresh `tilt up`
 runs no repo resources by default.
 
@@ -73,7 +73,7 @@ Local plugin dev: point `extension_repo` at `url='file:///abs/path/to/tilt-deven
 | `repos_link(remote, label='Repo')` | Tilt `link` to that URL. |
 | `repos_profiles_load()` | Resolve `tilt-devenv.json`'s `profiles` → `{name: [repo-or-group, ...]}`. |
 | `repos_active_profiles()` | The persisted active profile selection (empty = none picked yet); watches it for changes. |
-| `repos_profile_enabled(repo, profiles, active)` | Whether `repo` belongs to any of `active` profiles. True with no `active` only when `profiles` is empty (nothing to scope to). |
+| `repos_enabled(repo, profiles, active)` | Whether `repo` belongs to any of `active` profiles. True with no `active` only when `profiles` is empty (nothing to scope to). |
 
 ## Demo
 

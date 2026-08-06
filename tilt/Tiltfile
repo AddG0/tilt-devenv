@@ -8,7 +8,7 @@
 #     repos_status_ui({'my-service': 'my-service-repo'}, repos)
 #
 # For profile-gated resources, also load `repos_profiles_load`,
-# `repos_active_profiles`, and `repos_profile_enabled`. See their docstrings
+# `repos_active_profiles`, and `repos_enabled`. See their docstrings
 # below.
 #
 # Requires `repos` and `repos-tiltd` on PATH. Get them from the Nix flake, or
@@ -101,10 +101,10 @@ def repos_active_profiles():
         echo_off=True,
     )))
 
-def repos_profile_enabled(repo, profiles, active):
+def repos_enabled(repo, profiles, active):
     """
     True if `repo` (`.name`/`.group`) belongs to any of the `active`
-    profiles.
+    profiles — whether *this repo* is in scope, not whether some profile is.
 
     `profiles` maps profile name -> repo/group names, from
     `repos_profiles_load()`.
