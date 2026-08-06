@@ -218,24 +218,31 @@ pub fn is_checkout_all_click(button: &str) -> bool {
 }
 
 /// The global profile-switcher button: one checkbox per named profile (from
-/// `tilt-devenv.json`'s `profiles` key), defaulted to `active` (the persisted
-/// selection) — check any number, then click to save the selection, which
-/// triggers the Tiltfile reload that redefines resources to match (see the
-/// daemon's click handler).
-fn profile_button(names: &[String], active: &[String]) -> UiButton {
+/// `tilt-devenv.json`'s `profiles` key) that isn't in `no_access` (a profile
+/// resolving to a currently-unreachable repo, checked across the whole
+/// registry — see the daemon's `no_access_profiles`) — a profile you can't
+/// actually activate is left off the picker entirely, not just marked.
+/// Checkboxes default to `active` (the persisted selection); check any
+/// number and click to save, which triggers the Tiltfile reload that
+/// redefines resources to match (see the daemon's click handler).
+fn profile_button(names: &[String], active: &[String], no_access: &[String]) -> UiButton {
     let mut button = UiButton::new(PROFILE_BUTTON.to_string(), "profiles".to_string())
         .icon("checklist")
         .at("nav", "Global");
-    for name in names {
+    for name in names.iter().filter(|n| !no_access.contains(n)) {
         button = button.bool_input(name, name, active.contains(name));
     }
     button
 }
 
 /// (Re)applies the nav profile-switcher button, offering `names` defaulted to
-/// `active`.
-pub fn render_profile_button(names: &[String], active: &[String]) -> Result<()> {
-    client::apply(&profile_button(names, active))
+/// `active` — see [`profile_button`] for `no_access`.
+pub fn render_profile_button(
+    names: &[String],
+    active: &[String],
+    no_access: &[String],
+) -> Result<()> {
+    client::apply(&profile_button(names, active, no_access))
 }
 
 /// Deletes the nav profile-switcher button.
@@ -402,16 +409,27 @@ mod tests {
         assert!(!is_profile_click("repos-checkout-all"));
 
         let names = ["frontend".to_string(), "backend".to_string()];
-        let v = json(&profile_button(&names, &["backend".to_string()]));
+        let v = json(&profile_button(&names, &["backend".to_string()], &[]));
         assert_eq!(v["metadata"]["name"], "repos-profile");
         assert_eq!(v["spec"]["location"]["componentType"], "Global");
         assert_eq!(v["spec"]["location"]["componentID"], "nav");
+        assert_eq!(v["spec"]["iconName"], "checklist");
         let inputs = v["spec"]["inputs"].as_array().unwrap();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0]["name"], "frontend");
+        assert_eq!(inputs[0]["label"], "frontend");
         assert_eq!(inputs[0]["bool"]["defaultValue"], false, "not in active");
         assert_eq!(inputs[1]["name"], "backend");
         assert_eq!(inputs[1]["bool"]["defaultValue"], true, "in active");
+    }
+
+    #[test]
+    fn profile_button_omits_the_no_access_profiles_entirely() {
+        let names = ["frontend".to_string(), "backend".to_string()];
+        let v = json(&profile_button(&names, &[], &["backend".to_string()]));
+        let inputs = v["spec"]["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 1, "backend is left off the picker entirely");
+        assert_eq!(inputs[0]["name"], "frontend");
     }
 
     #[test]

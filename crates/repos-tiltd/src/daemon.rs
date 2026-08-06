@@ -179,7 +179,8 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
     groups.sort();
     groups.dedup();
 
-    render_global(&groups, &profile_names, &active_profiles);
+    let no_access = reg.as_ref().map(no_access_profiles).unwrap_or_default();
+    render_global(&groups, &profile_names, &active_profiles, &no_access);
 
     let ctx = ClickContext {
         root,
@@ -434,12 +435,17 @@ fn revert_removed_worktree(root: &Path, id: &str) {
 /// Draws the nav checkout-all button (offering `groups` in its dropdown), plus
 /// the profile-switcher button when `profile_names` is non-empty — its
 /// checkboxes default to `active_profiles`, the persisted selection.
-fn render_global(groups: &[String], profile_names: &[String], active_profiles: &[String]) {
+fn render_global(
+    groups: &[String],
+    profile_names: &[String],
+    active_profiles: &[String],
+    no_access: &[String],
+) {
     if let Err(e) = buttons::render_checkout_all(groups) {
         tracing::error!(error = %e, "failed to render checkout-all button");
     }
     if !profile_names.is_empty()
-        && let Err(e) = buttons::render_profile_button(profile_names, active_profiles)
+        && let Err(e) = buttons::render_profile_button(profile_names, active_profiles, no_access)
     {
         tracing::error!(error = %e, "failed to render profile button");
     }
@@ -455,31 +461,79 @@ fn checked_profiles(inputs: &HashMap<String, String>) -> Vec<String> {
         .collect()
 }
 
+/// The subset of `checked` that individually resolves to any repo in
+/// `unreachable` — so an access-denial log names only the profile(s)
+/// actually responsible, not every profile that happened to be checked in
+/// the same click.
+fn profiles_reaching<'a>(
+    reg: &Registry,
+    checked: &'a [String],
+    unreachable: &[&str],
+) -> Vec<&'a str> {
+    checked
+        .iter()
+        .filter(|p| {
+            reg.resolve_only(&[], std::slice::from_ref(*p))
+                .iter()
+                .any(|r| unreachable.contains(&r.as_str()))
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+/// Every profile that resolves to at least one currently-unreachable repo,
+/// checked live across the *whole* registry — not just what's scoped in —
+/// so the picker can leave them off entirely (see [`buttons::profile_button`])
+/// instead of only refusing to save one after the fact.
+fn no_access_profiles(reg: &Registry) -> Vec<String> {
+    let unreachable: Vec<String> = Workspace::from_registry(reg)
+        .inaccessible()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let unreachable: Vec<&str> = unreachable.iter().map(String::as_str).collect();
+    let names: Vec<String> = reg.profiles.keys().cloned().collect();
+    profiles_reaching(reg, &names, &unreachable)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 /// Persists `checked` as the active profile selection (empty enables every
 /// profile). The Tiltfile watches this file, so saving it triggers the reload
 /// that redefines resources for the new selection — no `tilt args` involved, so
 /// it survives a `tilt up` restart.
 ///
-/// Refuses to save (best-effort, via `reg`) when a not-yet-cloned repo in
-/// `checked` isn't reachable — better to fail the switch than persist a
+/// Refuses to save (best-effort, via `reg`) when `checked` includes a profile
+/// in [`no_access_profiles`] — better to fail the switch than persist a
 /// selection the next Tiltfile reload can't actually clone.
 fn switch_profile(state: &Path, root: &Path, reg: Option<&Registry>, checked: &[String]) {
     if let Some(reg) = reg {
-        let names = reg.resolve_only(&[], checked);
-        let inaccessible = Workspace::from_registry(reg)
-            .filter(&names, &[])
-            .inaccessible();
-        if !inaccessible.is_empty() {
+        let no_access = no_access_profiles(reg);
+        let culprits: Vec<&str> = checked
+            .iter()
+            .filter(|p| no_access.contains(p))
+            .map(String::as_str)
+            .collect();
+        if !culprits.is_empty() {
             tracing::error!(
-                profiles = ?checked,
-                repos = ?inaccessible.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-                "profile selection not saved: no access to one or more repos"
+                profiles = ?culprits,
+                "profile selection not saved: one or more profiles reach an inaccessible repo"
             );
             return;
         }
     }
     match repos_core::profile::set_active(state, root, checked) {
-        Ok(()) => tracing::info!(profiles = ?checked, "profile selection saved"),
+        Ok(()) => {
+            tracing::info!(profiles = ?checked, "profile selection saved");
+            if let Some(reg) = reg {
+                let all: Vec<String> = reg.profiles.keys().cloned().collect();
+                let no_access = no_access_profiles(reg);
+                if let Err(e) = buttons::render_profile_button(&all, checked, &no_access) {
+                    tracing::error!(error = %e, "failed to re-render profile button");
+                }
+            }
+        }
         Err(e) => tracing::error!(error = %e, "saving profile selection failed"),
     }
 }
@@ -554,6 +608,81 @@ mod tests {
     fn checked_profiles_is_empty_when_nothing_is_checked() {
         let inputs = HashMap::from([("frontend".to_string(), "false".to_string())]);
         assert!(checked_profiles(&inputs).is_empty());
+    }
+
+    #[test]
+    fn profiles_reaching_names_only_the_profiles_that_touch_an_unreachable_repo() {
+        let root = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            root.path().join("tilt-devenv.json"),
+            r#"{"repos":[
+                    {"name":"broken","url":"/no/such/remote","group":"g"},
+                    {"name":"fine","url":"u","group":"g"}
+                ],
+                "profiles":{
+                    "bad":["broken"],
+                    "unrelated":["fine"],
+                    "mixed":["broken","fine"]
+                }}"#,
+        )
+        .unwrap();
+        let reg = Registry::load_from(root.path()).unwrap();
+        let checked = vec![
+            "bad".to_string(),
+            "unrelated".to_string(),
+            "mixed".to_string(),
+        ];
+
+        let mut got = profiles_reaching(&reg, &checked, &["broken"]);
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["bad", "mixed"],
+            "unrelated doesn't resolve to the unreachable repo"
+        );
+    }
+
+    fn broken_repo_registry(root: &std::path::Path) -> Registry {
+        std::fs::write(
+            root.join("tilt-devenv.json"),
+            r#"{"repos":[{"name":"broken","url":"/no/such/remote","group":"g"}],
+                "profiles":{"bad":["broken"]}}"#,
+        )
+        .unwrap();
+        Registry::load_from(root).unwrap()
+    }
+
+    #[test]
+    fn switch_profile_refuses_a_selection_that_reaches_an_unreachable_repo() {
+        let root = tempfile::TempDir::new().unwrap();
+        let reg = broken_repo_registry(root.path());
+        let state = root.path().join("profiles.json");
+
+        switch_profile(&state, root.path(), Some(&reg), &["bad".to_string()]);
+        assert!(
+            repos_core::profile::active(&state, root.path()).is_empty(),
+            "must not save a selection that reaches an inaccessible repo"
+        );
+    }
+
+    #[test]
+    fn switch_profile_can_clear_the_selection_despite_an_unreachable_repo_elsewhere() {
+        let root = tempfile::TempDir::new().unwrap();
+        let reg = broken_repo_registry(root.path());
+        let state = root.path().join("profiles.json");
+
+        // Seed a real selection directly, bypassing the access check, so
+        // there's something to clear.
+        repos_core::profile::set_active(&state, root.path(), &["bad".to_string()]).unwrap();
+
+        // Regression: clearing the selection must never be blocked by some
+        // other, unrelated repo being unreachable — or nothing could ever
+        // un-stick a selection once any repo in the registry broke.
+        switch_profile(&state, root.path(), Some(&reg), &[]);
+        assert!(
+            repos_core::profile::active(&state, root.path()).is_empty(),
+            "clearing the selection must always be possible"
+        );
     }
 
     #[test]

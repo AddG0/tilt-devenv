@@ -18,7 +18,7 @@ make_repo() {
   git init -q --bare "$bare"
   git -c init.defaultBranch=main init -q "$seed"
   git -C "$seed" -c user.email=demo@example.com -c user.name=demo \
-    commit -q --allow-empty -m "init $name"
+    -c commit.gpgsign=false commit -q --allow-empty -m "init $name"
   git -C "$seed" branch -q feature-x
   git -C "$seed" remote add origin "$bare"
   git -C "$seed" push -q origin --all

@@ -171,6 +171,10 @@ pub struct ListArgs {
     /// Emit JSON instead of a table
     #[arg(long)]
     pub json: bool,
+    /// Check remote access for every not-yet-cloned repo (a `git ls-remote`
+    /// each, concurrently) and add it to the output
+    #[arg(long)]
+    pub check_access: bool,
 }
 
 #[derive(Args)]
