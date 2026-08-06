@@ -15,12 +15,12 @@ allow_k8s_contexts(k8s_context())
 # we load it by relative path so the example tracks the extension source
 # directly with no clone/cache step.
 load('../tilt/Tiltfile', 'repos_load', 'repos_status_ui', 'repos_link',
-     'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled')
+     'repos_profiles_load', 'repos_active_profiles', 'repos_enabled')
 
 profiles = repos_profiles_load()
 active = repos_active_profiles()
 repos = repos_load()
-enabled = {name: r for name, r in repos.items() if repos_profile_enabled(r, profiles, active)}
+enabled = {name: r for name, r in repos.items() if repos_enabled(r, profiles, active)}
 
 # Resource name == repo name here, so the mapping is identity.
 repos_status_ui(

@@ -12,7 +12,7 @@
 allow_k8s_contexts(k8s_context())
 
 load('../../tilt/Tiltfile', 'repos_load', 'repos_resolve', 'repos_status_ui', 'repos_browse_url',
-     'repos_link', 'repos_profiles_load', 'repos_active_profiles', 'repos_profile_enabled',
+     'repos_link', 'repos_profiles_load', 'repos_active_profiles', 'repos_enabled',
      'repos_bin', 'repos_tiltd_bin')
 
 # Unit assertions for repos_browse_url (pure remote -> browsable URL parser).
@@ -40,19 +40,19 @@ _eq(repos_browse_url('https://user@github.com/acme/foo.git'),
 _l = repos_link('git@gitlab.com:acme/foo.git', 'Src')
 _eq(_l.url, 'https://gitlab.com/acme/foo', 'repos_link url')
 
-# Unit assertions for repos_profile_enabled (pure membership check).
+# Unit assertions for repos_enabled (pure membership check).
 _pf = {'frontend': ['web', 'design-system'], 'backend': ['auth']}
-_eq(repos_profile_enabled(struct(name='web', group='ui'), _pf, ['frontend']),
+_eq(repos_enabled(struct(name='web', group='ui'), _pf, ['frontend']),
     True, 'enabled by name')
-_eq(repos_profile_enabled(struct(name='web', group='ui'), _pf, ['backend']),
+_eq(repos_enabled(struct(name='web', group='ui'), _pf, ['backend']),
     False, 'not enabled under an unrelated profile')
-_eq(repos_profile_enabled(struct(name='other', group='ui'), _pf, ['frontend', 'backend']),
+_eq(repos_enabled(struct(name='other', group='ui'), _pf, ['frontend', 'backend']),
     False, 'unlisted repo stays disabled')
-_eq(repos_profile_enabled(struct(name='web', group='ui'), {'ui-team': ['ui']}, ['ui-team']),
+_eq(repos_enabled(struct(name='web', group='ui'), {'ui-team': ['ui']}, ['ui-team']),
     True, 'enabled by group')
-_eq(repos_profile_enabled(struct(name='other', group='ui'), _pf, []),
+_eq(repos_enabled(struct(name='other', group='ui'), _pf, []),
     False, 'empty active means none enabled yet, when profiles exist')
-_eq(repos_profile_enabled(struct(name='other', group='ui'), {}, []),
+_eq(repos_enabled(struct(name='other', group='ui'), {}, []),
     True, 'no profiles defined means nothing to scope to')
 
 # run.sh clears both env vars, so these are the unset defaults.
