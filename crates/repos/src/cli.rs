@@ -186,7 +186,7 @@ pub struct ProfilesArgs {
 
 #[derive(Args)]
 pub struct LogsArgs {
-    /// Tilt resources to tail (default: all). e.g. `redis notifications`
+    /// Tilt resources to tail (default: every repo). e.g. `redis notifications`
     #[arg(add = ArgValueCompleter::new(crate::commands::logs::complete_resource))]
     pub resources: Vec<String>,
     /// Show current logs and exit instead of following the live stream

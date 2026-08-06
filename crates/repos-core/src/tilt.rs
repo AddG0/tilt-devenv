@@ -14,6 +14,12 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+/// Prefix for a repo's branch-picker button (`repos-branch-<resource>`, one
+/// per resource `repos-tiltd` manages). Shared with the CLI: [`branch_managed_resources`]
+/// uses it to tell a repo-backed Tilt resource apart from an unrelated one
+/// (infra, setup tasks) the same Tiltfile also defines.
+pub const BRANCH_BUTTON_PREFIX: &str = "repos-branch-";
+
 /// A Tilt UIButton, built fluently. Serialized straight into a manifest — JSON
 /// is valid YAML, so it feeds `tilt apply -f -` directly.
 #[derive(Serialize)]
@@ -202,12 +208,9 @@ pub fn apply(button: &UiButton) -> Result<()> {
     check(&child.wait_with_output()?, "tilt apply")
 }
 
-/// A Tilt UIResource: its name and whether it carries any Tilt label. Unlabeled
-/// resources are Tilt's setup/meta group (gradle-wrappers, pnpm-installs,
-/// `(Tiltfile)`) rather than running services.
+/// A Tilt UIResource's name.
 pub struct Resource {
     pub name: String,
-    pub labeled: bool,
 }
 
 /// Every UIResource via `tilt get uiresource -o json`. Erroring here doubles as
@@ -221,8 +224,8 @@ pub fn uiresources() -> Result<Vec<Resource>> {
     Ok(resources_from_json(&out.stdout))
 }
 
-/// Parses a `tilt get uiresource -o json` list into name + has-labels. Malformed
-/// output yields an empty list rather than an error.
+/// Parses a `tilt get uiresource -o json` list into names. Malformed output
+/// yields an empty list rather than an error.
 fn resources_from_json(json: &[u8]) -> Vec<Resource> {
     #[derive(Deserialize, Default)]
     struct List {
@@ -238,18 +241,60 @@ fn resources_from_json(json: &[u8]) -> Vec<Resource> {
     struct Meta {
         #[serde(default)]
         name: String,
-        #[serde(default)]
-        labels: HashMap<String, String>,
     }
     serde_json::from_slice::<List>(json)
         .unwrap_or_default()
         .items
         .into_iter()
-        .filter(|i| !i.metadata.name.is_empty())
         .map(|i| Resource {
             name: i.metadata.name,
-            labeled: !i.metadata.labels.is_empty(),
         })
+        .filter(|r| !r.name.is_empty())
+        .collect()
+}
+
+/// The Tilt resource names `repos-tiltd` manages a branch-picker button for —
+/// i.e. backed by one of the registry's repos, as opposed to infra or setup
+/// tasks the same Tiltfile also defines. Derived from `tilt get uibutton -o
+/// json` rather than resource labels: the daemon doesn't create the actual
+/// service resources (the Tiltfile does), so a button it *does* create is the
+/// only signal it directly controls.
+pub fn branch_managed_resources() -> Result<Vec<String>> {
+    let out = Command::new("tilt")
+        .args(["get", "uibutton", "-o", "json"])
+        .output()
+        .context("running `tilt get uibutton`")?;
+    check(&out, "tilt get uibutton")?;
+    Ok(branch_managed_from_json(&out.stdout))
+}
+
+fn branch_managed_from_json(json: &[u8]) -> Vec<String> {
+    #[derive(Deserialize, Default)]
+    struct List {
+        #[serde(default)]
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize, Default)]
+    struct Item {
+        #[serde(default)]
+        metadata: Meta,
+    }
+    #[derive(Deserialize, Default)]
+    struct Meta {
+        #[serde(default)]
+        name: String,
+    }
+    serde_json::from_slice::<List>(json)
+        .unwrap_or_default()
+        .items
+        .into_iter()
+        .filter_map(|i| {
+            i.metadata
+                .name
+                .strip_prefix(BRANCH_BUTTON_PREFIX)
+                .map(str::to_string)
+        })
+        .filter(|r| !r.is_empty())
         .collect()
 }
 
@@ -463,22 +508,33 @@ mod tests {
     }
 
     #[test]
-    fn resources_from_json_reads_names_labels_and_drops_empties() {
+    fn resources_from_json_reads_names_and_drops_empties() {
         let json = br#"{"items":[
-            {"metadata":{"name":"gateway","labels":{"infrastructure":"infrastructure"}}},
-            {"metadata":{"name":"gradle-wrappers"}},
+            {"metadata":{"name":"gateway"}},
             {"metadata":{"name":""}}
         ]}"#;
         let got = resources_from_json(json);
-        assert_eq!(got.len(), 2);
+        assert_eq!(got.len(), 1);
         assert_eq!(got[0].name, "gateway");
-        assert!(got[0].labeled);
-        assert_eq!(got[1].name, "gradle-wrappers");
-        assert!(!got[1].labeled, "no labels → unlabeled");
     }
 
     #[test]
     fn resources_from_json_treats_malformed_as_empty() {
         assert!(resources_from_json(b"not json").is_empty());
+    }
+
+    #[test]
+    fn branch_managed_from_json_strips_the_prefix_and_drops_unrelated_buttons() {
+        let json = br#"{"items":[
+            {"metadata":{"name":"repos-branch-auth-service"}},
+            {"metadata":{"name":"repos-pull-auth-service"}},
+            {"metadata":{"name":"repos-checkout-all"}}
+        ]}"#;
+        assert_eq!(branch_managed_from_json(json), vec!["auth-service"]);
+    }
+
+    #[test]
+    fn branch_managed_from_json_treats_malformed_as_empty() {
+        assert!(branch_managed_from_json(b"not json").is_empty());
     }
 }

@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use repos_core::devenv::{self, Snapshot};
 use repos_core::git;
-use repos_core::tilt::{self as client, UiButton};
+use repos_core::tilt::{self as client, BRANCH_BUTTON_PREFIX, UiButton};
 
-const BRANCH_PREFIX: &str = "repos-branch-";
 const PULL_PREFIX: &str = "repos-pull-";
 const WORKTREE_PREFIX: &str = "repos-worktree-";
 const CHECKOUT_ALL_BUTTON: &str = "repos-checkout-all";
@@ -19,7 +18,7 @@ const PROFILE_BUTTON: &str = "repos-profile";
 const ALL_GROUPS: &str = "(all groups)";
 
 fn branch_name(resource: &str) -> String {
-    format!("{BRANCH_PREFIX}{resource}")
+    format!("{BRANCH_BUTTON_PREFIX}{resource}")
 }
 fn pull_name(resource: &str) -> String {
     format!("{PULL_PREFIX}{resource}")
@@ -257,7 +256,9 @@ pub fn is_profile_click(button: &str) -> bool {
 
 /// Returns the resource a branch-button click targets.
 pub fn branch_click_resource(button: &str) -> Option<&str> {
-    button.strip_prefix(BRANCH_PREFIX).filter(|r| !r.is_empty())
+    button
+        .strip_prefix(BRANCH_BUTTON_PREFIX)
+        .filter(|r| !r.is_empty())
 }
 
 /// Returns the resource a pull-button click targets.

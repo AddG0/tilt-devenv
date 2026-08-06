@@ -20,7 +20,9 @@ use crate::cli::LogsArgs;
 
 pub fn run(args: &LogsArgs) -> Result<()> {
     let available = fetch_resources()?;
-    let targets = resolve_targets(args, &available)?;
+    let branch_managed = client::branch_managed_resources()
+        .context("couldn't reach Tilt — is `tilt up` running?")?;
+    let targets = resolve_targets(args, &available, &branch_managed)?;
 
     let dir = tempfile::Builder::new()
         .prefix("repos-logs-")
@@ -142,12 +144,16 @@ fn fetch_resources() -> Result<Vec<client::Resource>> {
     client::uiresources().context("couldn't reach Tilt — is `tilt up` running?")
 }
 
-/// The resources to tail: those named, or all *labeled* resources when none are.
-/// Unlabeled resources are Tilt's setup tasks (gradle-wrappers, pnpm-installs,
-/// repos-branches) — off by default, but still tailable when named explicitly.
-fn resolve_targets(args: &LogsArgs, available: &[client::Resource]) -> Result<Vec<String>> {
+/// The resources to tail: those named, or every repo-backed resource when
+/// none are. Infra and setup tasks (redis, gradle-wrappers, ...) are off by
+/// default, but still tailable when named explicitly.
+fn resolve_targets(
+    args: &LogsArgs,
+    available: &[client::Resource],
+    branch_managed: &[String],
+) -> Result<Vec<String>> {
     if args.resources.is_empty() {
-        let targets = default_targets(available);
+        let targets = default_targets(available, branch_managed);
         if targets.is_empty() {
             return Err(anyhow!("no resources to tail"));
         }
@@ -180,12 +186,12 @@ fn tilt_logs_args(args: &LogsArgs, targets: &[String]) -> Vec<String> {
     v
 }
 
-/// The default tail set: resources carrying a Tilt label. Unlabeled ones are
-/// setup/meta tasks (gradle-wrappers, pnpm-installs, `(Tiltfile)`), not services.
-fn default_targets(available: &[client::Resource]) -> Vec<String> {
+/// The default tail set: currently-existing resources the daemon manages a
+/// branch-picker button for — i.e. repos, not infra or setup tasks.
+fn default_targets(available: &[client::Resource], branch_managed: &[String]) -> Vec<String> {
     available
         .iter()
-        .filter(|r| r.labeled)
+        .filter(|r| branch_managed.contains(&r.name))
         .map(|r| r.name.clone())
         .collect()
 }
@@ -214,12 +220,11 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    fn resources(items: &[(&str, bool)]) -> Vec<client::Resource> {
-        items
+    fn resources(names: &[&str]) -> Vec<client::Resource> {
+        names
             .iter()
-            .map(|(name, labeled)| client::Resource {
+            .map(|name| client::Resource {
                 name: name.to_string(),
-                labeled: *labeled,
             })
             .collect()
     }
@@ -249,34 +254,45 @@ mod tests {
     }
 
     #[test]
-    fn resolve_targets_defaults_to_labeled_resources_only() {
-        let available = resources(&[
-            ("redis", true),
-            ("gradle-wrappers", false),
-            ("postgres", true),
-        ]);
-        let targets = resolve_targets(&logs_args(false, None, &[]), &available).unwrap();
-        assert_eq!(targets, ["redis", "postgres"]);
+    fn resolve_targets_defaults_to_branch_managed_resources_only() {
+        let available = resources(&["redis", "gradle-wrappers", "auth-service"]);
+        let branch_managed = owned(&["auth-service"]);
+        let targets =
+            resolve_targets(&logs_args(false, None, &[]), &available, &branch_managed).unwrap();
+        assert_eq!(targets, ["auth-service"]);
     }
 
     #[test]
-    fn resolve_targets_allows_naming_an_unlabeled_resource() {
-        let available = resources(&[("redis", true), ("gradle-wrappers", false)]);
-        let targets =
-            resolve_targets(&logs_args(false, None, &["gradle-wrappers"]), &available).unwrap();
-        assert_eq!(targets, ["gradle-wrappers"]);
+    fn resolve_targets_allows_naming_an_infra_resource() {
+        let available = resources(&["redis", "auth-service"]);
+        let branch_managed = owned(&["auth-service"]);
+        let targets = resolve_targets(
+            &logs_args(false, None, &["redis"]),
+            &available,
+            &branch_managed,
+        )
+        .unwrap();
+        assert_eq!(targets, ["redis"]);
     }
 
     #[test]
     fn resolve_targets_errors_on_unknown_resource() {
-        let available = resources(&[("redis", true)]);
-        assert!(resolve_targets(&logs_args(false, None, &["typo"]), &available).is_err());
+        let available = resources(&["auth-service"]);
+        let branch_managed = owned(&["auth-service"]);
+        assert!(
+            resolve_targets(
+                &logs_args(false, None, &["typo"]),
+                &available,
+                &branch_managed
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn resolve_targets_errors_when_nothing_is_labeled() {
-        let available = resources(&[("gradle-wrappers", false)]);
-        assert!(resolve_targets(&logs_args(false, None, &[]), &available).is_err());
+    fn resolve_targets_errors_when_nothing_is_branch_managed() {
+        let available = resources(&["gradle-wrappers"]);
+        assert!(resolve_targets(&logs_args(false, None, &[]), &available, &[]).is_err());
     }
 
     #[test]
