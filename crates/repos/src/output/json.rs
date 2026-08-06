@@ -9,7 +9,9 @@ use repos_core::devenv::{OpResult, Snapshot};
 use repos_core::registry::Resolved;
 use serde::Serialize;
 
-/// One item of `repos list --json`.
+/// One item of `repos list --json`. `accessError` is only present with
+/// `--check-access` — omitted (not `null`) otherwise, so the shape is
+/// unchanged for existing consumers that never pass the flag.
 #[derive(Serialize)]
 struct ListItem {
     name: String,
@@ -17,6 +19,8 @@ struct ListItem {
     group: String,
     path: String,
     present: bool,
+    #[serde(rename = "accessError", skip_serializing_if = "Option::is_none")]
+    access_error: Option<String>,
 }
 
 /// One item of `repos status --json`.
@@ -52,7 +56,10 @@ fn print_json<T: Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
-pub fn print_list_json(repos: &[Resolved]) -> Result<()> {
+pub fn print_list_json(
+    repos: &[Resolved],
+    no_access: Option<&BTreeMap<String, String>>,
+) -> Result<()> {
     let items: Vec<ListItem> = repos
         .iter()
         .map(|r| ListItem {
@@ -61,6 +68,7 @@ pub fn print_list_json(repos: &[Resolved]) -> Result<()> {
             group: r.repo.group.clone(),
             path: r.path.display().to_string(),
             present: r.present,
+            access_error: no_access.and_then(|m| m.get(&r.repo.name).cloned()),
         })
         .collect();
     print_json(&items)

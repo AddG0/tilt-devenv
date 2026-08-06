@@ -173,7 +173,10 @@ impl Project {
     }
 
     /// Fast-forwards the project to its upstream. Fetches first, skips a dirty
-    /// tree, and reports (rather than merges) a diverged branch. Refreshes after.
+    /// tree, and reports (rather than merges) a diverged branch. On `nightly`,
+    /// force-resets to `origin/nightly` instead — same as checkout's nightly
+    /// handling — since a fast-forward would fail once local and remote have
+    /// diverged after a rewrite there. Refreshes after.
     pub fn pull(&self) -> OpResult {
         let name = &self.cfg.name;
         if !git::is_repo(&self.cfg.path) {
@@ -188,9 +191,18 @@ impl Project {
         };
 
         let mut res = OpResult::new(name);
-        res.branch = st.branch;
+        res.branch = st.branch.clone();
         if st.dirty {
             res.outcome = Outcome::SkippedDirty;
+        } else if st.branch == NIGHTLY {
+            if st.ahead == 0 && st.behind == 0 {
+                res.outcome = Outcome::UpToDate;
+            } else if let Err(e) = git::checkout_reset_to_remote(&self.cfg.path, NIGHTLY) {
+                res.outcome = Outcome::Errored;
+                res.err = Some(e.to_string());
+            } else {
+                res.outcome = Outcome::Pulled;
+            }
         } else if st.behind == 0 {
             res.outcome = Outcome::UpToDate;
         } else if let Err(e) = git::fast_forward(&self.cfg.path) {
@@ -499,6 +511,49 @@ mod tests {
         gittest::write(dirty.path(), "wip.txt", "x\n");
         let r = Project::new(config("dirty", dirty.path()), None).pull();
         assert_eq!(r.outcome, Outcome::SkippedDirty);
+    }
+
+    #[test]
+    fn pull_on_nightly_mirrors_the_remote_when_diverged() {
+        gittest::isolate();
+        let seed = gittest::init_repo();
+        gittest::git(seed.path(), &["branch", "nightly"]);
+        let origin = gittest::clone_bare(seed.path());
+        let work = gittest::clone(origin.path());
+
+        // A stale local commit on nightly that a plain fast-forward can't reconcile.
+        gittest::git(work.path(), &["switch", "nightly"]);
+        gittest::commit(work.path(), "stale.txt", "x\n", "stale local nightly");
+
+        // Meanwhile origin/nightly moved on independently (e.g. a nightly rebuild).
+        let other = gittest::clone(origin.path());
+        gittest::git(other.path(), &["switch", "nightly"]);
+        gittest::commit(other.path(), "new.txt", "y\n", "new remote nightly");
+        gittest::git(other.path(), &["push", "origin", "nightly"]);
+
+        let r = Project::new(config("n", work.path()), None).pull();
+        assert_eq!(r.outcome, Outcome::Pulled);
+        assert_eq!(current_branch(work.path()), "nightly");
+        let head = gittest::git(work.path(), &["rev-parse", "HEAD"]);
+        let origin_nightly = gittest::git(work.path(), &["rev-parse", "origin/nightly"]);
+        assert_eq!(
+            head.trim(),
+            origin_nightly.trim(),
+            "nightly mirrored; stale local commit discarded"
+        );
+    }
+
+    #[test]
+    fn pull_on_nightly_reports_up_to_date_without_resetting() {
+        gittest::isolate();
+        let seed = gittest::init_repo();
+        gittest::git(seed.path(), &["branch", "nightly"]);
+        let origin = gittest::clone_bare(seed.path());
+        let work = gittest::clone(origin.path());
+        gittest::git(work.path(), &["switch", "nightly"]);
+
+        let r = Project::new(config("n", work.path()), None).pull();
+        assert_eq!(r.outcome, Outcome::UpToDate);
     }
 
     #[test]

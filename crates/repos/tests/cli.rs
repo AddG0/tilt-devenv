@@ -62,6 +62,53 @@ fn list_json_has_the_expected_shape_and_formatting() {
 }
 
 #[test]
+fn list_json_omits_access_error_without_the_flag() {
+    let root = fixture(r#"[{"name":"foo","url":"/no/such/remote","group":"g"}]"#);
+    let out = repos(&root).args(["list", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        !v[0].as_object().unwrap().contains_key("accessError"),
+        "accessError must be absent unless --check-access is passed"
+    );
+}
+
+#[test]
+fn list_check_access_reports_per_repo_reachability() {
+    let (_origin, url) = bare_origin_url();
+    let root = fixture(&format!(
+        r#"[{{"name":"reachable","url":{},"group":"g"}},
+            {{"name":"broken","url":"/no/such/remote","group":"g"}}]"#,
+        serde_json::to_string(&url).unwrap(),
+    ));
+
+    let out = repos(&root)
+        .args(["list", "--json", "--check-access"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.stderr);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let by_name = |name: &str| v.as_array().unwrap().iter().find(|i| i["name"] == name);
+
+    assert!(
+        !by_name("reachable")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("accessError"),
+        "a reachable repo has no accessError"
+    );
+    assert!(
+        by_name("broken").unwrap()["accessError"]
+            .as_str()
+            .unwrap()
+            .contains("/no/such/remote"),
+        "broken: {:?}",
+        by_name("broken")
+    );
+}
+
+#[test]
 fn status_json_omits_empty_fields_for_an_uncloned_repo() {
     let root = fixture(r#"[{"name":"foo","url":"u","group":"g"}]"#);
     let out = repos(&root).args(["status", "--json"]).output().unwrap();

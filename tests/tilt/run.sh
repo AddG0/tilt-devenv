@@ -37,7 +37,7 @@ for name in alpha beta; do
   git init -q -b main --bare "$bare"
   git -c init.defaultBranch=main init -q "$seed"
   git -C "$seed" -c user.email=test@example.com -c user.name=test \
-    commit -q --allow-empty -m "init $name"
+    -c commit.gpgsign=false commit -q --allow-empty -m "init $name"
   git -C "$seed" branch -q feature-x
   git -C "$seed" remote add origin "$bare"
   git -C "$seed" push -q origin --all

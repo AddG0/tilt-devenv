@@ -305,11 +305,17 @@ pub fn print_status_table(statuses: &[Snapshot]) {
 }
 
 /// Renders the resolved repo→path table as a single table, sectioned by group
-/// with alternating row shading.
-pub fn print_list_table(repos: &[Resolved]) {
+/// with alternating row shading. `no_access` (repo name -> error), when
+/// given, adds an ACCESS column — omitted entirely without it, since most
+/// invocations never pay for the network round trips that build it.
+pub fn print_list_table(repos: &[Resolved], no_access: Option<&BTreeMap<String, String>>) {
     let unicode = std::io::stdout().is_terminal();
     let color = color_enabled();
-    let mut t = new_table(&["GROUP", "REPO", "PATH", "ON DISK"], unicode, color);
+    let mut headers = vec!["GROUP", "REPO", "PATH", "ON DISK"];
+    if no_access.is_some() {
+        headers.push("ACCESS");
+    }
+    let mut t = new_table(&headers, unicode, color);
     let mut row = 0;
     for (group, rs) in group_by(repos, |r| r.repo.group.as_str()) {
         for (i, r) in rs.into_iter().enumerate() {
@@ -319,12 +325,19 @@ pub fn print_list_table(repos: &[Resolved]) {
             } else {
                 styled("missing", Style::Red)
             };
-            let cells = [
+            let mut cells = vec![
                 group_label_cell(group, i == 0),
                 Cell::new(&r.repo.name),
                 Cell::new(r.path.display().to_string()),
                 on_disk,
             ];
+            if let Some(no_access) = no_access {
+                cells.push(if no_access.contains_key(&r.repo.name) {
+                    styled("no access", Style::Red)
+                } else {
+                    styled("ok", Style::Dim)
+                });
+            }
             t.add_row(cells.into_iter().map(|c| zebra(c, striped)));
             row += 1;
         }
