@@ -62,10 +62,8 @@
             # Build both frontend binaries (the CLI and the daemon); repos-core is
             # a library, pulled in as their dependency.
             cargoExtraArgs = "-p repos -p repos-tiltd";
-            # Tests run as a separate flake check, so `nix build .#repos` and
-            # entering the devShell stay fast.
-            doCheck = false;
-            nativeBuildInputs = [pkgs.installShellFiles];
+            # Tests spawn git to build throwaway repos.
+            nativeBuildInputs = [pkgs.installShellFiles pkgs.git];
             # Ship shell completions (clap dynamic completion) so an importing
             # devShell picks them up, and install the Tilt extension beside the
             # binary so a consumer Tiltfile can find it from `repos` on PATH
@@ -117,13 +115,9 @@
         };
 
         checks = {
+          # `repos` runs the workspace tests during its own build (doCheck
+          # defaults to true), so this check exercises them too.
           inherit repos;
-          # The crate tests spawn git to build throwaway repos.
-          repos-tests = craneLib.cargoTest (commonArgs
-            // {
-              inherit cargoArtifacts;
-              nativeBuildInputs = [pkgs.git];
-            });
           tiltfile-test = tiltfileTest;
         };
 
@@ -151,6 +145,22 @@
                 cp ${cargoVendorDir}/config.toml "$CARGO_HOME/config.toml"
                 export CARGO_HOME
                 exec cargo-clippy clippy --all-targets --offline "$@" -- --deny warnings
+              '';
+            });
+            files = "\\.rs$";
+            pass_filenames = false;
+          };
+          cargo-test-tool = {
+            enable = true;
+            entry = pkgs.lib.getExe (pkgs.writeShellApplication {
+              name = "cargo-test-offline";
+              # Tests spawn git to build throwaway repos.
+              runtimeInputs = [rustToolchain pkgs.git];
+              text = ''
+                CARGO_HOME=$(mktemp -d)
+                cp ${cargoVendorDir}/config.toml "$CARGO_HOME/config.toml"
+                export CARGO_HOME
+                exec cargo test --workspace --offline "$@"
               '';
             });
             files = "\\.rs$";
