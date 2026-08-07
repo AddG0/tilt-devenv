@@ -25,12 +25,13 @@ extension uses them. They're command prefixes, not just paths, so they can be bu
 
 ```json
 [
-  { "name": "auth", "url": "git@gitlab.com:acme/auth.git", "group": "backend" },
+  { "name": "auth", "url": "git@gitlab.com:acme/auth.git", "group": "backend", "subpath": "services" },
   { "name": "web",  "url": "git@github.com:acme/web.git",  "group": "frontend" }
 ]
 ```
 
-Path resolution: `tilt_config.json` override > `ghq` checkout > sibling dir. See `repos --help`.
+Path resolution: `tilt_config.json` override > `ghq` checkout > sibling dir, where an entry's
+optional `subpath` nests that sibling dir under the workspace base. See `repos --help`.
 
 Optionally, wrap the array in `{"repos": [...], "profiles": {...}}` to name profiles — a
 profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`. Set the

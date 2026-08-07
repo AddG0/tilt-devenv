@@ -15,13 +15,28 @@ static ISOLATE: Once = Once::new();
 
 /// Points git at empty global/system config and a fixed identity for the whole
 /// test process, so no user gitconfig (commit signing, default branch, …) can
-/// leak in. Set exactly once (via [`Once`]) so parallel tests never race on the
-/// process environment. Call before any git operation.
+/// leak in, and drops any inherited repo-location vars. Set exactly once (via
+/// [`Once`]) so parallel tests never race on the process environment. Call
+/// before any git operation.
 pub fn isolate() {
     ISOLATE.call_once(|| {
         // SAFETY: guarded by Once, so this runs on a single thread before any
         // other test spawns git; the values are process-wide constants.
         unsafe {
+            // A parent git command exports a relative GIT_INDEX_FILE (pre-commit
+            // does), which would then resolve against each temp repo below.
+            for var in [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_NAMESPACE",
+                "GIT_PREFIX",
+            ] {
+                std::env::remove_var(var);
+            }
             std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
             std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
             std::env::set_var("GIT_AUTHOR_NAME", "test");

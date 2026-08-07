@@ -22,6 +22,10 @@ pub struct Repo {
     pub url: String,
     #[serde(default)]
     pub group: String,
+    /// Directory under the workspace base to check out into. The checkout is
+    /// always `name` within it; empty puts it directly at the base.
+    #[serde(default)]
+    pub subpath: String,
 }
 
 #[derive(Deserialize)]
@@ -324,7 +328,7 @@ impl Registry {
     }
 
     /// The repo's main checkout, ignoring any worktree selection: per-repo
-    /// override > ghq checkout > sibling directory.
+    /// override > ghq checkout > `subpath` under the workspace.
     fn base_path_for(&self, repo: &Repo) -> PathBuf {
         if let Some(o) = self.overrides.get(&repo.name)
             && !o.is_empty()
@@ -334,7 +338,7 @@ impl Registry {
         if let Some(p) = self.ghq_path(&repo.url) {
             return p;
         }
-        self.workspace.join(&repo.name)
+        self.workspace.join(&repo.subpath).join(&repo.name)
     }
 
     /// Maps a git URL to its ghq checkout path (via [`ghq_relpath`]) if one
@@ -558,6 +562,92 @@ mod tests {
 
     #[test]
     fn repos_json_object_form_sets_workspace_base() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"workspace":"projects","repos":[{"name":"foo","url":"u","group":"g"}]}"#,
+        );
+
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(reg.resolve()[0].path, root.path().join("projects/foo"));
+    }
+
+    #[test]
+    fn subpath_nests_the_checkout_between_the_workspace_and_the_repo_name() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"workspace":"projects","repos":[
+                {"name":"auth","url":"u","subpath":"services/internal"}
+            ]}"#,
+        );
+
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(
+            reg.resolve()[0].path,
+            root.path().join("projects/services/internal/auth")
+        );
+    }
+
+    #[test]
+    fn an_existing_ghq_checkout_wins_over_the_subpath() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"git@gitlab.com:acme/Bar.git","subpath":"nested"}]}"#,
+        );
+        let ghq = TempDir::new().unwrap();
+        std::fs::create_dir_all(ghq.path().join("gitlab.com/acme/Bar")).unwrap();
+
+        let mut reg = Registry::load_from(root.path()).unwrap();
+        reg.ghq_roots = vec![ghq.path().to_path_buf()];
+
+        assert_eq!(
+            reg.resolve()[0].path,
+            ghq.path().join("gitlab.com/acme/Bar")
+        );
+    }
+
+    #[test]
+    fn the_subpath_applies_when_no_ghq_checkout_exists_yet() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"git@gitlab.com:acme/Bar.git","subpath":"nested"}]}"#,
+        );
+        let ghq = TempDir::new().unwrap();
+
+        let mut reg = Registry::load_from(root.path()).unwrap();
+        reg.ghq_roots = vec![ghq.path().to_path_buf()];
+
+        assert_eq!(reg.resolve()[0].path, root.path().join("nested/foo"));
+    }
+
+    #[test]
+    fn a_repo_override_still_wins_over_the_subpath() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"u","subpath":"nested"}]}"#,
+        );
+        let elsewhere = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt_config.json",
+            &format!(r#"{{"repo-foo":{}}}"#, quote(elsewhere.path())),
+        );
+
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(reg.resolve()[0].path, elsewhere.path());
+    }
+
+    #[test]
+    fn an_omitted_subpath_puts_the_checkout_at_the_workspace_base() {
         let root = TempDir::new().unwrap();
         write_file(
             root.path(),
