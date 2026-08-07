@@ -352,8 +352,8 @@ mod tests {
         assert!(!is_checkout_all_click("repos-branch-x"));
 
         let v = json(&checkout_all_button(&[
-            "rating".to_string(),
-            "dashboard".to_string(),
+            "backend".to_string(),
+            "frontend".to_string(),
         ]));
         assert_eq!(v["metadata"]["name"], "repos-checkout-all");
         assert_eq!(v["spec"]["text"], "⎇ checkout all repos");
@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(inputs[1]["name"], "group");
         assert_eq!(
             inputs[1]["choice"]["choices"],
-            serde_json::json!(["(all groups)", "rating", "dashboard"])
+            serde_json::json!(["(all groups)", "backend", "frontend"])
         );
         assert_eq!(inputs[2]["name"], "active_profile_only");
         assert_eq!(inputs[2]["bool"]["defaultValue"], false);
@@ -377,9 +377,9 @@ mod tests {
         assert_eq!(
             checkout_all_group(&HashMap::from([(
                 "group".to_string(),
-                "rating".to_string()
+                "backend".to_string()
             )])),
-            Some("rating".to_string())
+            Some("backend".to_string())
         );
         assert_eq!(
             checkout_all_group(&HashMap::from([(
