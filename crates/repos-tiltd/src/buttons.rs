@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use repos_core::devenv::{self, Snapshot};
 use repos_core::git;
-use repos_core::tilt::{self as client, BRANCH_BUTTON_PREFIX, UiButton};
+use repos_core::tilt::{self as client, BRANCH_BUTTON_PREFIX, Click, UiButton};
 
 const PULL_PREFIX: &str = "repos-pull-";
 const WORKTREE_PREFIX: &str = "repos-worktree-";
@@ -190,23 +190,9 @@ pub fn render_checkout_all(groups: &[String]) -> Result<()> {
     client::apply(&checkout_all_button(groups))
 }
 
-/// The chosen group from a checkout-all click's `group` input, or `None` for
-/// [`ALL_GROUPS`] / an absent value (no restriction).
-pub fn checkout_all_group(inputs: &HashMap<String, String>) -> Option<String> {
-    match inputs.get("group") {
-        Some(g) if !g.is_empty() && g != ALL_GROUPS => Some(g.clone()),
-        _ => None,
-    }
-}
-
 /// Deletes the nav checkout-all button.
 pub fn remove_checkout_all() -> Result<()> {
     client::delete_button(CHECKOUT_ALL_BUTTON)
-}
-
-/// Reports whether a click came from the nav checkout-all button.
-pub fn is_checkout_all_click(button: &str) -> bool {
-    button == CHECKOUT_ALL_BUTTON
 }
 
 /// The global profile-switcher button: one checkbox per named profile (from
@@ -246,11 +232,6 @@ pub fn render_profile_button(names: &[String], active: &[String]) -> Result<bool
 /// Deletes the nav profile-switcher button.
 pub fn remove_profile_button() -> Result<()> {
     client::delete_button(PROFILE_BUTTON)
-}
-
-/// Reports whether a click came from the nav profile-switcher button.
-pub fn is_profile_click(button: &str) -> bool {
-    button == PROFILE_BUTTON
 }
 
 /// The update button's icon. The count is drawn here rather than put in the
@@ -328,33 +309,203 @@ pub fn remove_update_button() -> Result<()> {
     client::delete_button(UPDATE_BUTTON)
 }
 
-/// Reports whether a click came from the nav dev-env update button.
-pub fn is_update_click(button: &str) -> bool {
-    button == UPDATE_BUTTON
+/// What a button press means. The handler matches on this, so a new button
+/// nobody wired up fails to compile rather than silently doing nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Check every in-scope repo out onto `branch`; empty means each repo's
+    /// own default.
+    CheckoutAll {
+        branch: String,
+        group: Option<String>,
+    },
+    /// Fast-forward the dev environment itself.
+    UpdateDevEnv,
+    /// Save this profile selection; empty clears it.
+    SetProfiles(Vec<String>),
+    Checkout {
+        resource: String,
+        branch: String,
+    },
+    Pull {
+        resource: String,
+    },
+    /// Switch `resource` to the worktree holding `branch`.
+    SelectWorktree {
+        resource: String,
+        branch: String,
+    },
 }
 
-/// Returns the resource a branch-button click targets.
-pub fn branch_click_resource(button: &str) -> Option<&str> {
-    button
-        .strip_prefix(BRANCH_BUTTON_PREFIX)
-        .filter(|r| !r.is_empty())
+/// Resolves a click into the [`Action`] it means, or `None` for a button this
+/// daemon doesn't own — Tilt streams every button's clicks, including its own
+/// stop/disable ones.
+pub fn action(click: &Click) -> Option<Action> {
+    let input = |name: &str| click.inputs.get(name).cloned().unwrap_or_default();
+    let of_resource = |prefix: &str| {
+        click
+            .button
+            .strip_prefix(prefix)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+    };
+
+    match click.button.as_str() {
+        CHECKOUT_ALL_BUTTON => {
+            return Some(Action::CheckoutAll {
+                branch: input("branch"),
+                group: chosen_group(&click.inputs),
+            });
+        }
+        UPDATE_BUTTON => return Some(Action::UpdateDevEnv),
+        PROFILE_BUTTON => return Some(Action::SetProfiles(checked(&click.inputs))),
+        _ => {}
+    }
+    if let Some(resource) = of_resource(BRANCH_BUTTON_PREFIX) {
+        return Some(Action::Checkout {
+            resource,
+            branch: input("branch"),
+        });
+    }
+    if let Some(resource) = of_resource(PULL_PREFIX) {
+        return Some(Action::Pull { resource });
+    }
+    of_resource(WORKTREE_PREFIX).map(|resource| Action::SelectWorktree {
+        resource,
+        branch: input("worktree"),
+    })
 }
 
-/// Returns the resource a pull-button click targets.
-pub fn pull_click_resource(button: &str) -> Option<&str> {
-    button.strip_prefix(PULL_PREFIX).filter(|r| !r.is_empty())
+/// Checkout-all's `group` input, or `None` for [`ALL_GROUPS`] / an absent value.
+fn chosen_group(inputs: &HashMap<String, String>) -> Option<String> {
+    match inputs.get("group") {
+        Some(g) if !g.is_empty() && g != ALL_GROUPS => Some(g.clone()),
+        _ => None,
+    }
 }
 
-/// Returns the resource a worktree-button click targets.
-pub fn worktree_click_resource(button: &str) -> Option<&str> {
-    button
-        .strip_prefix(WORKTREE_PREFIX)
-        .filter(|r| !r.is_empty())
+/// The names of the ticked checkboxes, from a click's raw input values
+/// (`"true"`/`"false"`, per [`repos_core::tilt`]'s bool encoding).
+fn checked(inputs: &HashMap<String, String>) -> Vec<String> {
+    inputs
+        .iter()
+        .filter(|(_, v)| v.as_str() == "true")
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Deletes every nav button this daemon owns, so shutdown leaves none behind.
+pub fn remove_global() -> Result<()> {
+    remove_checkout_all()?;
+    remove_profile_button()?;
+    remove_update_button()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn click(button: &str, inputs: &[(&str, &str)]) -> Click {
+        Click {
+            button: button.to_string(),
+            inputs: inputs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_button_this_daemon_does_not_own_decodes_to_nothing() {
+        // A bare prefix names no resource, so it must not decode to one.
+        for name in [
+            "toggle-redis-disable",
+            "git-status-stopbuild",
+            "repos-branch-",
+            "repos-pull-",
+        ] {
+            assert_eq!(action(&click(name, &[])), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn checkout_all_carries_its_branch_and_group() {
+        assert_eq!(
+            action(&click(
+                CHECKOUT_ALL_BUTTON,
+                &[("branch", "feat/x"), ("group", "backend")]
+            )),
+            Some(Action::CheckoutAll {
+                branch: "feat/x".to_string(),
+                group: Some("backend".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn checkout_all_treats_the_all_groups_sentinel_as_no_restriction() {
+        let group = |g| match action(&click(CHECKOUT_ALL_BUTTON, &[("group", g)])) {
+            Some(Action::CheckoutAll { group, .. }) => group,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(group(ALL_GROUPS), None);
+        assert_eq!(group(""), None);
+        assert_eq!(group("backend"), Some("backend".to_string()));
+    }
+
+    #[test]
+    fn setting_profiles_keeps_only_the_ticked_boxes() {
+        assert_eq!(
+            action(&click(
+                PROFILE_BUTTON,
+                &[("frontend", "true"), ("backend", "false")]
+            )),
+            Some(Action::SetProfiles(vec!["frontend".to_string()]))
+        );
+    }
+
+    #[test]
+    fn setting_no_profiles_is_a_selection_of_none_not_a_missing_action() {
+        assert_eq!(
+            action(&click(PROFILE_BUTTON, &[("frontend", "false")])),
+            Some(Action::SetProfiles(vec![]))
+        );
+    }
+
+    #[test]
+    fn the_update_button_needs_no_inputs() {
+        assert_eq!(
+            action(&click(UPDATE_BUTTON, &[])),
+            Some(Action::UpdateDevEnv)
+        );
+    }
+
+    #[test]
+    fn per_resource_buttons_carry_the_resource_they_belong_to() {
+        assert_eq!(
+            action(&click("repos-branch-web-app", &[("branch", "main")])),
+            Some(Action::Checkout {
+                resource: "web-app".to_string(),
+                branch: "main".to_string(),
+            })
+        );
+        assert_eq!(
+            action(&click("repos-pull-worker", &[])),
+            Some(Action::Pull {
+                resource: "worker".to_string()
+            })
+        );
+        assert_eq!(
+            action(&click(
+                "repos-worktree-auth-service",
+                &[("worktree", "feat/login")]
+            )),
+            Some(Action::SelectWorktree {
+                resource: "auth-service".to_string(),
+                branch: "feat/login".to_string(),
+            })
+        );
+    }
 
     fn json(button: &UiButton) -> serde_json::Value {
         serde_json::to_value(button).unwrap()
@@ -427,9 +578,6 @@ mod tests {
 
     #[test]
     fn checkout_all_is_a_nav_button_with_branch_and_group_inputs() {
-        assert!(is_checkout_all_click("repos-checkout-all"));
-        assert!(!is_checkout_all_click("repos-branch-x"));
-
         let v = json(&checkout_all_button(&[
             "backend".to_string(),
             "frontend".to_string(),
@@ -450,29 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_all_group_reads_the_chosen_group_or_none_for_the_all_sentinel() {
-        assert_eq!(
-            checkout_all_group(&HashMap::from([(
-                "group".to_string(),
-                "backend".to_string()
-            )])),
-            Some("backend".to_string())
-        );
-        assert_eq!(
-            checkout_all_group(&HashMap::from([(
-                "group".to_string(),
-                ALL_GROUPS.to_string()
-            )])),
-            None
-        );
-        assert_eq!(checkout_all_group(&HashMap::new()), None);
-    }
-
-    #[test]
     fn profile_button_is_a_nav_button_with_one_checkbox_per_profile() {
-        assert!(is_profile_click("repos-profile"));
-        assert!(!is_profile_click("repos-checkout-all"));
-
         let names = ["frontend".to_string(), "backend".to_string()];
         let v = json(&profile_button(&names, &["backend".to_string()]));
         assert_eq!(v["metadata"]["name"], "repos-profile");
@@ -557,9 +683,6 @@ mod tests {
 
     #[test]
     fn update_is_a_nav_button_carrying_its_own_colour() {
-        assert!(is_update_click("repos-dev-env-update"));
-        assert!(!is_update_click("repos-checkout-all"));
-
         let v = json(&update_button(3, true));
         assert_eq!(v["metadata"]["name"], "repos-dev-env-update");
         assert_eq!(v["spec"]["location"]["componentType"], "Global");
@@ -702,21 +825,5 @@ mod tests {
             !unsupervised.contains("restarts Tilt"),
             "a bare `tilt up` can't restart itself; don't claim it will: {unsupervised}"
         );
-    }
-
-    #[test]
-    fn click_resource_classification() {
-        assert_eq!(
-            branch_click_resource("repos-branch-web-app"),
-            Some("web-app")
-        );
-        assert_eq!(pull_click_resource("repos-pull-worker"), Some("worker"));
-        assert_eq!(
-            worktree_click_resource("repos-worktree-auth-service"),
-            Some("auth-service")
-        );
-        assert_eq!(branch_click_resource("repos-pull-x"), None);
-        assert_eq!(pull_click_resource("toggle-redis-disable"), None);
-        assert_eq!(worktree_click_resource("repos-branch-x"), None);
     }
 }

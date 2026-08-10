@@ -6,7 +6,6 @@
 //! --watch` pane that only re-reads local state, so the two never race each
 //! other's fetches.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +25,7 @@ use repos_core::selfupdate::DevEnv;
 use repos_core::tilt::{self as client, Click};
 use repos_core::{git, worktree};
 
-use crate::buttons;
+use crate::buttons::{self, Action};
 use crate::debounce::Debouncer;
 use crate::updater;
 
@@ -307,9 +306,7 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration, self_update: bool) -> Res
         for p in ws.projects() {
             let _ = p.retire();
         }
-        let _ = buttons::remove_checkout_all();
-        let _ = buttons::remove_profile_button();
-        let _ = buttons::remove_update_button();
+        let _ = buttons::remove_global();
     })
     .await;
     Ok(())
@@ -331,75 +328,78 @@ struct ClickContext {
     dev_env: Option<Arc<DevEnv>>,
 }
 
-/// Dispatches a button press to the matching project's in-process operation, off
-/// the event loop (on the blocking pool) so a slow git op doesn't stall watching.
+/// Dispatches a button press to the matching in-process operation, off the
+/// event loop (on the blocking pool) so a slow git op doesn't stall watching.
 fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
-    tracing::debug!(button = %c.button, "click");
+    let Some(action) = buttons::action(&c) else {
+        tracing::debug!(button = %c.button, "click on a button we don't own");
+        return;
+    };
+    tracing::debug!(button = %c.button, ?action, "click");
 
-    let branch = c.inputs.get("branch").cloned().unwrap_or_default();
-    if buttons::is_checkout_all_click(&c.button) {
-        let group: Vec<String> = buttons::checkout_all_group(&c.inputs).into_iter().collect();
-        let names = ctx.active_profile_repos.clone();
-        // Profiles defined but none picked means nothing is in scope — the same
-        // rule the CLI applies, rather than quietly acting on the whole registry.
-        if ctx
-            .reg
-            .as_ref()
-            .is_some_and(|r| r.is_unscoped(&names, &group, false))
-        {
-            tracing::warn!("no active profile selected; nothing to check out");
-            return;
+    match action {
+        Action::CheckoutAll { branch, group } => {
+            let group: Vec<String> = group.into_iter().collect();
+            let names = ctx.active_profile_repos.clone();
+            // Profiles defined but none picked means nothing is in scope — the
+            // same rule the CLI applies, rather than quietly acting on the
+            // whole registry.
+            if ctx
+                .reg
+                .as_ref()
+                .is_some_and(|r| r.is_unscoped(&names, &group, false))
+            {
+                tracing::warn!("no active profile selected; nothing to check out");
+                return;
+            }
+            let ws = ws.clone();
+            tokio::task::spawn_blocking(move || checkout_all(&ws, &branch, &names, &group));
         }
-        let ws = ws.clone();
-        tokio::task::spawn_blocking(move || checkout_all(&ws, &branch, &names, &group));
-        return;
-    }
-    if buttons::is_update_click(&c.button) {
-        if let Some(dev) = ctx.dev_env.clone() {
-            tokio::task::spawn_blocking(move || updater::apply(&dev));
-        } else {
-            tracing::error!("no dev environment to update");
-        }
-        return;
-    }
-    if buttons::is_profile_click(&c.button) {
-        let checked = checked_profiles(&c.inputs);
-        if let (Some(root), Some(state)) = (ctx.root.clone(), ctx.profile_state.clone()) {
-            let reg = ctx.reg.clone();
-            tokio::task::spawn_blocking(move || {
-                switch_profile(&state, &root, reg.as_ref(), &checked)
-            });
-        } else {
-            tracing::error!(
+
+        Action::UpdateDevEnv => match ctx.dev_env.clone() {
+            Some(dev) => {
+                tokio::task::spawn_blocking(move || updater::apply(&dev));
+            }
+            None => tracing::error!("no dev environment to update"),
+        },
+
+        Action::SetProfiles(checked) => match (ctx.root.clone(), ctx.profile_state.clone()) {
+            (Some(root), Some(state)) => {
+                let reg = ctx.reg.clone();
+                tokio::task::spawn_blocking(move || {
+                    switch_profile(&state, &root, reg.as_ref(), &checked)
+                });
+            }
+            _ => tracing::error!(
                 "couldn't find tilt-devenv.json or a state directory — selection not saved"
-            );
+            ),
+        },
+
+        Action::Checkout { resource, branch } => {
+            if let Some(p) = ws.by_resource(&resource) {
+                let p = p.clone();
+                tokio::task::spawn_blocking(move || checkout(&p, &branch));
+            }
         }
-        return;
-    }
-    if let Some(res) = buttons::branch_click_resource(&c.button) {
-        if let Some(p) = ws.by_resource(res) {
+
+        Action::Pull { resource } => {
+            if let Some(p) = ws.by_resource(&resource) {
+                let p = p.clone();
+                tokio::task::spawn_blocking(move || pull(&p));
+            }
+        }
+
+        Action::SelectWorktree { resource, branch } => {
+            let Some(p) = ws.by_resource(&resource) else {
+                return;
+            };
+            let Some(root) = ctx.root.clone() else {
+                tracing::error!("couldn't find tilt-devenv.json — nothing switched");
+                return;
+            };
             let p = p.clone();
-            tokio::task::spawn_blocking(move || checkout(&p, &branch));
+            tokio::task::spawn_blocking(move || select_worktree(&p, &branch, &root));
         }
-        return;
-    }
-    if let Some(res) = buttons::pull_click_resource(&c.button)
-        && let Some(p) = ws.by_resource(res)
-    {
-        let p = p.clone();
-        tokio::task::spawn_blocking(move || pull(&p));
-        return;
-    }
-    if let Some(res) = buttons::worktree_click_resource(&c.button)
-        && let Some(p) = ws.by_resource(res)
-    {
-        let p = p.clone();
-        let selected = c.inputs.get("worktree").cloned().unwrap_or_default();
-        let Some(root) = ctx.root.clone() else {
-            tracing::error!("couldn't find tilt-devenv.json — nothing switched");
-            return;
-        };
-        tokio::task::spawn_blocking(move || select_worktree(&p, &selected, &root));
     }
 }
 
@@ -521,16 +521,6 @@ fn render_profile_picker(selectable: &[String], active: &[String], defined: usiz
     }
 }
 
-/// The names of the profile-button's checked checkboxes, from a click's raw
-/// input values (`"true"`/`"false"`, per [`repos_core::tilt`]'s bool encoding).
-fn checked_profiles(inputs: &HashMap<String, String>) -> Vec<String> {
-    inputs
-        .iter()
-        .filter(|(_, v)| v.as_str() == "true")
-        .map(|(name, _)| name.clone())
-        .collect()
-}
-
 /// Persists `checked` as the active profile selection (empty enables every
 /// profile). The Tiltfile watches this file, so saving it triggers the reload
 /// that redefines resources for the new selection — no `tilt args` involved, so
@@ -627,21 +617,6 @@ mod tests {
 
     fn git_path(name: &str) -> PathBuf {
         PathBuf::from("/repo/.git").join(name)
-    }
-
-    #[test]
-    fn checked_profiles_keeps_only_true_valued_inputs() {
-        let inputs = HashMap::from([
-            ("frontend".to_string(), "true".to_string()),
-            ("backend".to_string(), "false".to_string()),
-        ]);
-        assert_eq!(checked_profiles(&inputs), vec!["frontend".to_string()]);
-    }
-
-    #[test]
-    fn checked_profiles_is_empty_when_nothing_is_checked() {
-        let inputs = HashMap::from([("frontend".to_string(), "false".to_string())]);
-        assert!(checked_profiles(&inputs).is_empty());
     }
 
     fn broken_repo_registry(root: &std::path::Path) -> Registry {
