@@ -39,9 +39,15 @@ pub struct Snapshot {
     pub branch: String,
     pub detached: bool,
     pub upstream: String,
+    /// Meaningless when [`mirror`](Self::mirror) — see there.
     pub ahead: i32,
     pub behind: i32,
     pub dirty: bool,
+    /// This branch tracks its remote exactly — syncing replaces the local copy
+    /// rather than merging into it, so `ahead` is never work of yours to push.
+    /// A rebuilt-and-force-pushed remote reports the orphaned old tip as
+    /// `ahead` even on a checkout nobody has touched.
+    pub mirror: bool,
     pub default_branch: String,
     /// Status couldn't be read.
     pub err: Option<String>,
@@ -71,6 +77,9 @@ pub enum Outcome {
     Errored,
     /// Fast-forwarded to upstream.
     Pulled,
+    /// Replaced wholesale from the remote, discarding whatever was here — what
+    /// syncing a mirror branch means. Nothing was merged.
+    Mirrored,
     /// Already level with upstream.
     UpToDate,
     /// Cloned from the remote.
@@ -91,6 +100,7 @@ impl Outcome {
             Outcome::Missing => "missing",
             Outcome::Errored => "error",
             Outcome::Pulled => "pulled",
+            Outcome::Mirrored => "mirrored",
             Outcome::UpToDate => "up-to-date",
             Outcome::Cloned => "cloned",
             Outcome::AlreadyPresent => "already-present",

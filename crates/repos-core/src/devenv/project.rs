@@ -10,6 +10,12 @@ use crate::git;
 /// discarded in favour of `origin/nightly`.
 const NIGHTLY: &str = "nightly";
 
+/// Whether `branch` mirrors its remote rather than merging with it — see
+/// [`Snapshot::mirror`](crate::devenv::Snapshot::mirror).
+fn is_mirror(branch: &str) -> bool {
+    branch == NIGHTLY
+}
+
 /// The aggregate root: one repo checkout. It owns its current state, the
 /// operations on it, and its own concurrency — every state read/write goes
 /// through its mutex, so the daemon's tasks (fs-watch, clicks) need no
@@ -92,6 +98,7 @@ impl Project {
         s.ahead = st.ahead;
         s.behind = st.behind;
         s.dirty = st.dirty;
+        s.mirror = is_mirror(&s.branch);
         if let Ok(def) = git::default_branch(&self.cfg.path) {
             s.default_branch = def;
         }
@@ -194,14 +201,14 @@ impl Project {
         res.branch = st.branch.clone();
         if st.dirty {
             res.outcome = Outcome::SkippedDirty;
-        } else if st.branch == NIGHTLY {
+        } else if is_mirror(&st.branch) {
             if st.ahead == 0 && st.behind == 0 {
                 res.outcome = Outcome::UpToDate;
             } else if let Err(e) = git::checkout_reset_to_remote(&self.cfg.path, NIGHTLY) {
                 res.outcome = Outcome::Errored;
                 res.err = Some(e.to_string());
             } else {
-                res.outcome = Outcome::Pulled;
+                res.outcome = Outcome::Mirrored;
             }
         } else if st.behind == 0 {
             res.outcome = Outcome::UpToDate;
@@ -309,7 +316,7 @@ fn decide(target: &CheckoutTarget, f: &Facts) -> Plan {
             branch: name.clone(),
             // nightly always mirrors the remote, so force-reset to origin/nightly
             // rather than checking out a possibly-stale local copy.
-            mirror: name.as_str() == NIGHTLY && f.remote,
+            mirror: is_mirror(name.as_str()) && f.remote,
             outcome: Outcome::OnBranch,
         },
         // A named branch that exists nowhere falls back to the default.
@@ -532,7 +539,12 @@ mod tests {
         gittest::git(other.path(), &["push", "origin", "nightly"]);
 
         let r = Project::new(config("n", work.path()), None).pull();
-        assert_eq!(r.outcome, Outcome::Pulled);
+        assert_eq!(
+            r.outcome,
+            Outcome::Mirrored,
+            "not a fast-forward — the local commit was discarded, and saying \
+             \"pulled\" would hide that"
+        );
         assert_eq!(current_branch(work.path()), "nightly");
         let head = gittest::git(work.path(), &["rev-parse", "HEAD"]);
         let origin_nightly = gittest::git(work.path(), &["rev-parse", "origin/nightly"]);

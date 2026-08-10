@@ -38,6 +38,10 @@ struct StatusItem {
     ahead: i32,
     behind: i32,
     dirty: bool,
+    /// Syncing replaces this branch rather than merging into it, so `ahead` is
+    /// leftover history from a rewritten remote, not commits to push.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    mirror: bool,
     #[serde(rename = "defaultBranch", skip_serializing_if = "String::is_empty")]
     default_branch: String,
     #[serde(rename = "onDefault")]
@@ -111,6 +115,7 @@ pub fn print_status_json(statuses: &[Snapshot]) -> Result<()> {
             upstream: s.upstream.clone(),
             ahead: s.ahead,
             behind: s.behind,
+            mirror: s.mirror,
             dirty: s.dirty,
             default_branch: s.default_branch.clone(),
             on_default: s.is_on_default_branch(),

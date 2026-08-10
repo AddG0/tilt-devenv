@@ -146,7 +146,8 @@ fn caption(s: &Snapshot) -> String {
         return "⎇ (detached)".to_string();
     }
     let mut c = format!("⎇ {}", s.branch);
-    if s.ahead > 0 {
+    // See `Snapshot::mirror`: ahead is the rewritten remote's leftovers here.
+    if s.ahead > 0 && !s.mirror {
         c += &format!(" ↑{}", s.ahead);
     }
     if s.behind > 0 {
@@ -524,6 +525,20 @@ mod tests {
         for want in ["develop", "↑2", "↓1", "●"] {
             assert!(got.contains(want), "caption = {got:?}, want {want:?}");
         }
+    }
+
+    #[test]
+    fn caption_hides_ahead_on_a_mirror_branch() {
+        let got = caption(&Snapshot {
+            present: true,
+            branch: "nightly".into(),
+            mirror: true,
+            ahead: 1,
+            behind: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(got, "⎇ nightly ↓1");
     }
 
     #[test]

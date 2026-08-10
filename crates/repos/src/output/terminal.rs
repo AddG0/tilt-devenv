@@ -171,7 +171,8 @@ fn sync_text(s: &Snapshot, unicode: bool) -> String {
         return "no upstream".to_string();
     }
     let mut out = String::new();
-    if s.ahead > 0 {
+    // See `Snapshot::mirror`: ahead is the rewritten remote's leftovers here.
+    if s.ahead > 0 && !s.mirror {
         out += &format!("{}{}", if unicode { "↑" } else { "+" }, s.ahead);
     }
     if s.behind > 0 {
@@ -217,6 +218,10 @@ fn pull_line(r: &OpResult) -> String {
     let err = r.err.as_deref().unwrap_or_default();
     match r.outcome {
         Outcome::Pulled => green(&format!("⬇ {} → {} (fast-forwarded)", r.name, r.branch)),
+        Outcome::Mirrored => green(&format!(
+            "⬇ {} → {} (replaced from origin)",
+            r.name, r.branch
+        )),
         Outcome::UpToDate => dim(&format!("✓ {} up to date", r.name)),
         Outcome::SkippedDirty => yellow(&format!("● skip {} (dirty, on {})", r.name, r.branch)),
         Outcome::Missing => dim(&format!("· skip {} (not cloned)", r.name)),
@@ -229,8 +234,9 @@ fn pull_line(r: &OpResult) -> String {
 fn pull_summary(results: &[OpResult]) -> String {
     let n = |o| count_with_outcome(results, o);
     dim(&format!(
-        "— {} pulled, {} up to date, {} skipped, {} missing, {} errored",
+        "— {} pulled, {} mirrored, {} up to date, {} skipped, {} missing, {} errored",
         n(Outcome::Pulled),
+        n(Outcome::Mirrored),
         n(Outcome::UpToDate),
         n(Outcome::SkippedDirty),
         n(Outcome::Missing),
@@ -420,6 +426,35 @@ mod tests {
     }
 
     #[test]
+    fn sync_text_hides_ahead_on_a_mirror_branch() {
+        // A rebuilt-and-force-pushed nightly reports "+1 -1" on a checkout
+        // nobody has touched.
+        let s = Snapshot {
+            upstream: "origin/nightly".into(),
+            branch: "nightly".into(),
+            mirror: true,
+            ahead: 1,
+            behind: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(sync_text(&s, true), "↓1");
+        assert_eq!(sync_text(&s, false), "-1");
+    }
+
+    #[test]
+    fn sync_text_still_reports_a_mirror_branch_as_in_sync() {
+        let s = Snapshot {
+            upstream: "origin/nightly".into(),
+            branch: "nightly".into(),
+            mirror: true,
+            ..Default::default()
+        };
+
+        assert_eq!(sync_text(&s, true), "✓");
+    }
+
+    #[test]
     fn sync_text_shows_ahead_and_behind() {
         let s = Snapshot {
             ahead: 2,
@@ -546,6 +581,17 @@ mod tests {
                 && got.contains("1 on default")
                 && got.contains("1 skipped"),
             "summary = {got:?}"
+        );
+    }
+
+    #[test]
+    fn pull_line_says_a_mirror_was_replaced_not_fast_forwarded() {
+        let got = pull_line(&result("svc", Outcome::Mirrored, "nightly"));
+
+        assert!(got.contains("replaced from origin"), "line = {got:?}");
+        assert!(
+            !got.contains("fast-forward"),
+            "a mirror discards local commits; don't call it a fast-forward: {got:?}"
         );
     }
 
