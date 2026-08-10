@@ -254,11 +254,13 @@ impl Project {
     /// Whether the project's remote is reachable and permitted, checked via a
     /// lightweight `git ls-remote` rather than a clone. Skipped (`Ok`) when
     /// already on disk — already having it is already-proven access.
-    pub fn check_access(&self) -> anyhow::Result<()> {
+    /// Returns the typed [`git::Error`] so a caller can tell a refusal apart
+    /// from "couldn't tell" — the two must not be treated alike.
+    pub fn check_access(&self) -> git::Result<()> {
         if git::is_repo(&self.cfg.path) {
             return Ok(());
         }
-        git::can_access(&self.cfg.url).map_err(Into::into)
+        git::can_access(&self.cfg.url)
     }
 
     /// Updates remote-tracking refs, returning any error (local status stays

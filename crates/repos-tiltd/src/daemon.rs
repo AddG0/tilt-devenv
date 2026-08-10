@@ -630,15 +630,19 @@ mod tests {
     }
 
     #[test]
-    fn switch_profile_refuses_a_selection_that_reaches_an_unreachable_repo() {
+    fn switch_profile_saves_when_a_repo_merely_failed_to_answer() {
+        // An unreachable remote isn't a refusal — treating it as one leaves a
+        // developer unable to pick any profile offline.
         let root = tempfile::TempDir::new().unwrap();
         let reg = broken_repo_registry(root.path());
         let state = root.path().join("profiles.json");
 
         switch_profile(&state, root.path(), Some(&reg), &["bad".to_string()]);
-        assert!(
-            repos_core::profile::active(&state, root.path()).is_empty(),
-            "must not save a selection that reaches an inaccessible repo"
+
+        assert_eq!(
+            repos_core::profile::active(&state, root.path()),
+            vec!["bad".to_string()],
+            "a remote that never answered must not block the selection"
         );
     }
 

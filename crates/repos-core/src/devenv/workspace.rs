@@ -15,18 +15,13 @@ pub struct Workspace {
 /// a caller can leave those profiles out of a picker entirely instead of
 /// failing the selection after the fact.
 ///
-/// Does network I/O: one `git ls-remote` per not-yet-cloned repo (already
-/// cloned repos are taken as reachable). Cache the result rather than calling
-/// it per profile, and keep it off paths that must work offline — it counts
-/// "couldn't reach" the same as "refused", so offline it names every profile.
+/// Only counts remotes that answered and refused, so offline this is empty and
+/// every profile stays pickable. Does network I/O: one `git ls-remote` per
+/// not-yet-cloned repo, so cache the result rather than calling it per profile.
 pub fn unreachable_profiles(reg: &Registry) -> Vec<String> {
-    let unreachable: Vec<String> = Workspace::from_registry(reg)
-        .inaccessible()
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-    let unreachable: Vec<&str> = unreachable.iter().map(String::as_str).collect();
-    reg.profiles_reaching(&unreachable)
+    let denied = Workspace::from_registry(reg).access_denied();
+    let denied: Vec<&str> = denied.iter().map(String::as_str).collect();
+    reg.profiles_reaching(&denied)
 }
 
 impl Workspace {
@@ -121,6 +116,17 @@ impl Workspace {
             .collect()
     }
 
+    /// The projects whose remote *answered and refused*. Empty when offline: an
+    /// unreachable network says nothing about whether you have access, and
+    /// treating it as a refusal would strip a developer's profiles on a plane.
+    pub fn access_denied(&self) -> Vec<String> {
+        self.projects
+            .par_iter()
+            .filter(|p| matches!(p.check_access(), Err(crate::git::Error::AccessDenied(_))))
+            .map(|p| p.name().to_string())
+            .collect()
+    }
+
     /// Switches every project to `target` (default-branch fallback where absent).
     pub fn checkout_all(&self, target: &CheckoutTarget) -> Vec<OpResult> {
         self.projects
@@ -159,9 +165,11 @@ impl Workspace {
             .collect()
     }
 
-    /// The name and error message of every project whose remote isn't
-    /// accessible, checked concurrently via [`Project::check_access`] —
-    /// verifying access to a profile's repos before persisting it.
+    /// The name and error of every project whose remote didn't answer cleanly.
+    ///
+    /// Diagnostic only: it includes failures that prove nothing about access —
+    /// offline, a bad URL — so don't gate a decision on it. Use
+    /// [`access_denied`](Self::access_denied) for that.
     pub fn inaccessible(&self) -> Vec<(String, String)> {
         self.projects
             .par_iter()
@@ -189,6 +197,21 @@ mod tests {
             path: path.to_path_buf(),
             url: String::new(),
         }
+    }
+
+    #[test]
+    fn a_remote_that_never_answered_is_not_a_refusal() {
+        // git appends "Could not read from remote repository" to every failure,
+        // so a bogus URL and an offline SSH remote look alike at the surface.
+        gittest::isolate();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = Workspace::plain(vec![Config {
+            url: "/no/such/remote".to_string(),
+            ..config("gone", &dir.path().join("not-cloned"))
+        }]);
+
+        assert!(ws.access_denied().is_empty(), "not a refusal");
+        assert_eq!(ws.inaccessible().len(), 1, "still worth reporting though");
     }
 
     #[test]

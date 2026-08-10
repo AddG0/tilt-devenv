@@ -370,8 +370,11 @@ fn classify_failure(out: &std::process::Output, context: &str) -> Error {
 /// private repo you can't see, indistinguishable from one that doesn't exist.
 fn is_access_denied(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
+    // Deliberately not "could not read from remote repository": git appends that
+    // line whatever went wrong — offline, bad URL, no such repo — so matching it
+    // turns every failure into a denial. Only phrases that mean the remote
+    // *answered and refused* count.
     s.contains("permission denied")
-        || s.contains("could not read from remote repository")
         || s.contains("repository not found")
         || s.contains("access denied")
         || s.contains("authentication failed")
@@ -737,9 +740,16 @@ mod tests {
 
     #[test]
     fn is_access_denied_ignores_generic_failures() {
+        // Verbatim from git, trailer included: it appends that line to every
+        // failure, so a fixture without it can't catch a matcher that keys on it.
         let generic = [
-            "fatal: repository '/no/such/remote' does not exist",
-            "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host",
+            "fatal: '/no/such/remote' does not appear to be a git repository\n\
+             fatal: Could not read from remote repository.\n\n\
+             Please make sure you have the correct access rights\nand the repository exists.",
+            "fatal: unable to access 'https://x.invalid/y.git/': Could not resolve host: x.invalid",
+            "ssh: Could not resolve hostname x.invalid: Name or service not known\n\
+             fatal: Could not read from remote repository.\n\n\
+             Please make sure you have the correct access rights\nand the repository exists.",
             "fatal: destination path 'repo' already exists and is not an empty directory.",
         ];
         for stderr in generic {
