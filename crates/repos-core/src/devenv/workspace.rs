@@ -69,6 +69,7 @@ impl Workspace {
                 resource: r.repo.name,
                 path: r.path,
                 url: r.repo.url,
+                mirror_branches: reg.mirror_branches.clone(),
             })
             .collect();
         Workspace::plain(cfgs)
@@ -192,10 +193,9 @@ mod tests {
     fn config(name: &str, path: &Path) -> Config {
         Config {
             name: name.to_string(),
-            group: String::new(),
             resource: name.to_string(),
             path: path.to_path_buf(),
-            url: String::new(),
+            ..Default::default()
         }
     }
 

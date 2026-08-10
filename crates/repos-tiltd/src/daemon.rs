@@ -90,6 +90,15 @@ pub fn run(poll: Duration, self_update: bool) -> Result<()> {
     let spec = std::env::var("REPOS_TILT_SPEC")
         .map_err(|_| anyhow!("REPOS_TILT_SPEC is not set (the Tiltfile passes it)"))?;
     let specs: Vec<WatchSpec> = serde_json::from_str(&spec).context("parsing REPOS_TILT_SPEC")?;
+    // The spec carries per-resource data only; anything registry-wide (which
+    // branches mirror their remote, the profiles) comes from here.
+    let reg = Registry::load()
+        .inspect_err(|e| tracing::warn!(error = %e, "couldn't read tilt-devenv.json — the worktree and profile buttons won't work"))
+        .ok();
+    let mirror_branches = reg
+        .as_ref()
+        .map(|r| r.mirror_branches.clone())
+        .unwrap_or_default();
     let cfgs = specs
         .into_iter()
         .map(|s| Config {
@@ -99,16 +108,22 @@ pub fn run(poll: Duration, self_update: bool) -> Result<()> {
             path: s.path,
             // The Tiltfile clones before the daemon starts; it never clones.
             url: String::new(),
+            mirror_branches: mirror_branches.clone(),
         })
         .collect();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(run_daemon(cfgs, poll, self_update))
+    rt.block_on(run_daemon(cfgs, reg, poll, self_update))
 }
 
-async fn run_daemon(cfgs: Vec<Config>, poll: Duration, self_update: bool) -> Result<()> {
+async fn run_daemon(
+    cfgs: Vec<Config>,
+    reg: Option<Registry>,
+    poll: Duration,
+    self_update: bool,
+) -> Result<()> {
     let ws = Arc::new(Workspace::with_presenter(cfgs, |c| {
         Box::new(buttons::Presenter::new(&c.resource, c.path.clone()))
     }));
@@ -147,12 +162,6 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration, self_update: bool) -> Res
         }
         watched.push((common, p.clone()));
     }
-    // Dev-env registry, for reverting a repo to its main checkout when its
-    // selected worktree is removed, and for the profile-switcher button's
-    // choices (best-effort — no reconciliation if it can't be found).
-    let reg = Registry::load()
-        .inspect_err(|e| tracing::warn!(error = %e, "couldn't read tilt-devenv.json — the worktree and profile buttons won't work"))
-        .ok();
     let root = reg.as_ref().map(|r| r.root.clone());
     let profile_names: Vec<String> = reg
         .as_ref()

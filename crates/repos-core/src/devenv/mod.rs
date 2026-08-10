@@ -20,13 +20,16 @@ use std::path::PathBuf;
 /// Identifies a project: its registry name and group, the Tilt resource that
 /// represents it (defaults to the name outside Tilt), its on-disk path, and
 /// its remote url (for `clone_if_missing`; empty when a consumer never clones).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     pub name: String,
     pub group: String,
     pub resource: String,
     pub path: PathBuf,
     pub url: String,
+    /// Registry-wide, but carried per project so a [`Project`] can answer
+    /// [`Snapshot::mirror`] without reaching back for the registry.
+    pub mirror_branches: Vec<String>,
 }
 
 /// The current information about a project — a value object copied out from

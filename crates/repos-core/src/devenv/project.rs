@@ -6,16 +6,6 @@ use super::{
 };
 use crate::git;
 
-/// Branch that must always mirror the remote: on checkout, a stale local copy is
-/// discarded in favour of `origin/nightly`.
-const NIGHTLY: &str = "nightly";
-
-/// Whether `branch` mirrors its remote rather than merging with it — see
-/// [`Snapshot::mirror`](crate::devenv::Snapshot::mirror).
-fn is_mirror(branch: &str) -> bool {
-    branch == NIGHTLY
-}
-
 /// The aggregate root: one repo checkout. It owns its current state, the
 /// operations on it, and its own concurrency — every state read/write goes
 /// through its mutex, so the daemon's tasks (fs-watch, clicks) need no
@@ -79,6 +69,12 @@ impl Project {
         snap
     }
 
+    /// Whether `branch` mirrors its remote rather than merging with it — see
+    /// [`Snapshot::mirror`](crate::devenv::Snapshot::mirror).
+    fn is_mirror(&self, branch: &str) -> bool {
+        self.cfg.mirror_branches.iter().any(|m| m == branch)
+    }
+
     fn compute(&self) -> Snapshot {
         let mut s = base_snapshot(&self.cfg);
         if !git::is_repo(&self.cfg.path) {
@@ -98,7 +94,7 @@ impl Project {
         s.ahead = st.ahead;
         s.behind = st.behind;
         s.dirty = st.dirty;
-        s.mirror = is_mirror(&s.branch);
+        s.mirror = self.is_mirror(&s.branch);
         if let Ok(def) = git::default_branch(&self.cfg.path) {
             s.default_branch = def;
         }
@@ -171,11 +167,16 @@ impl Project {
             CheckoutTarget::Named(name) => git::branch_exists(&self.cfg.path, name.as_str()),
             CheckoutTarget::Default => (false, false),
         };
+        let mirror = match target {
+            CheckoutTarget::Named(name) => self.is_mirror(name.as_str()),
+            CheckoutTarget::Default => false,
+        };
         Facts {
             dirty: st.dirty,
             default_branch,
             local,
             remote,
+            mirror,
         }
     }
 
@@ -201,10 +202,10 @@ impl Project {
         res.branch = st.branch.clone();
         if st.dirty {
             res.outcome = Outcome::SkippedDirty;
-        } else if is_mirror(&st.branch) {
+        } else if self.is_mirror(&st.branch) {
             if st.ahead == 0 && st.behind == 0 {
                 res.outcome = Outcome::UpToDate;
-            } else if let Err(e) = git::checkout_reset_to_remote(&self.cfg.path, NIGHTLY) {
+            } else if let Err(e) = git::checkout_reset_to_remote(&self.cfg.path, &st.branch) {
                 res.outcome = Outcome::Errored;
                 res.err = Some(e.to_string());
             } else {
@@ -289,6 +290,9 @@ struct Facts {
     /// For a named target: whether it exists as a local / origin branch.
     local: bool,
     remote: bool,
+    /// The target is a branch that mirrors its remote, so switching to it must
+    /// take the remote's copy rather than a possibly-stale local one.
+    mirror: bool,
 }
 
 /// What to do about a checkout, decided from [`Facts`] alone.
@@ -318,7 +322,7 @@ fn decide(target: &CheckoutTarget, f: &Facts) -> Plan {
             branch: name.clone(),
             // nightly always mirrors the remote, so force-reset to origin/nightly
             // rather than checking out a possibly-stale local copy.
-            mirror: is_mirror(name.as_str()) && f.remote,
+            mirror: f.mirror && f.remote,
             outcome: Outcome::OnBranch,
         },
         // A named branch that exists nowhere falls back to the default.
@@ -376,10 +380,10 @@ mod tests {
     fn config(name: &str, path: &Path) -> Config {
         Config {
             name: name.to_string(),
-            group: String::new(),
             resource: name.to_string(),
             path: path.to_path_buf(),
-            url: String::new(),
+            mirror_branches: vec!["nightly".to_string()],
+            ..Default::default()
         }
     }
 
@@ -643,7 +647,19 @@ mod tests {
     }
 
     fn facts(dirty: bool, default: Result<&str, &str>, local: bool, remote: bool) -> Facts {
+        facts_for(dirty, default, local, remote, false)
+    }
+
+    /// `mirror` says the target branch is one that mirrors its remote.
+    fn facts_for(
+        dirty: bool,
+        default: Result<&str, &str>,
+        local: bool,
+        remote: bool,
+        mirror: bool,
+    ) -> Facts {
         Facts {
+            mirror,
             dirty,
             default_branch: default
                 .map(|s| BranchName::from_trusted(s.to_string()))
@@ -718,15 +734,26 @@ mod tests {
     }
 
     #[test]
-    fn decide_mirrors_nightly_only_when_it_exists_on_the_remote() {
-        // On the remote: mirror (force-reset to origin/nightly).
+    fn decide_mirrors_whatever_branch_the_registry_calls_a_mirror() {
+        // The rule is configuration, not the literal name "nightly".
         assert!(matches!(
-            decide(&named("nightly"), &facts(false, Ok("main"), false, true)),
+            decide(
+                &named("snapshot"),
+                &facts_for(false, Ok("main"), false, true, true)
+            ),
             Plan::Switch { mirror: true, .. }
         ));
-        // Local-only nightly: a plain checkout, no mirror.
+    }
+
+    #[test]
+    fn decide_mirrors_only_what_the_remote_actually_has() {
+        // Nothing to mirror *from* — a local-only copy is all there is, so take
+        // it rather than force-resetting to a branch the remote doesn't carry.
         assert!(matches!(
-            decide(&named("nightly"), &facts(false, Ok("main"), true, false)),
+            decide(
+                &named("nightly"),
+                &facts_for(false, Ok("main"), true, false, true)
+            ),
             Plan::Switch { mirror: false, .. }
         ));
     }

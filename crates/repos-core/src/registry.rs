@@ -15,6 +15,9 @@ use serde::Deserialize;
 /// The dev-environment manifest, found at the dev-env repo root.
 const MANIFEST: &str = "tilt-devenv.json";
 
+/// Branches treated as mirrors when the manifest doesn't name any.
+const DEFAULT_MIRROR_BRANCHES: [&str; 1] = ["nightly"];
+
 /// One entry from `tilt-devenv.json`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Repo {
@@ -39,6 +42,10 @@ struct RegistryConfig {
     /// the repo or group names it enables.
     #[serde(default)]
     profiles: BTreeMap<String, Vec<String>>,
+    /// Branches rebuilt and force-pushed upstream, so syncing replaces the local
+    /// copy instead of merging. Empty falls back to [`DEFAULT_MIRROR_BRANCHES`].
+    #[serde(default, rename = "mirrorBranches")]
+    mirror_branches: Vec<String>,
 }
 
 /// The `tilt-devenv.json` file: the object form, or a bare `[...]` array of repos
@@ -57,6 +64,7 @@ impl RegistryFile {
                 workspace: String::new(),
                 repos,
                 profiles: BTreeMap::new(),
+                mirror_branches: Vec::new(),
             },
             RegistryFile::Config(cfg) => cfg,
         }
@@ -81,6 +89,8 @@ pub struct Registry {
     pub repos: Vec<Repo>,
     /// Profile name -> the repo or group names it enables.
     pub profiles: BTreeMap<String, Vec<String>>,
+    /// Branches that mirror their remote — see [`crate::devenv::Snapshot::mirror`].
+    pub mirror_branches: Vec<String>,
     /// Base dir for the sibling layout.
     workspace: PathBuf,
     /// Repo name -> explicit path override.
@@ -106,10 +116,19 @@ impl Registry {
             .with_context(|| format!("parsing {MANIFEST}"))?
             .into_config();
 
+        let mirror_branches = if cfg.mirror_branches.is_empty() {
+            DEFAULT_MIRROR_BRANCHES
+                .iter()
+                .map(|b| b.to_string())
+                .collect()
+        } else {
+            cfg.mirror_branches
+        };
         let mut reg = Registry {
             root: root.to_path_buf(),
             repos: cfg.repos,
             profiles: cfg.profiles,
+            mirror_branches,
             workspace: root.to_path_buf(),
             overrides: HashMap::new(),
             worktrees: HashMap::new(),
@@ -941,6 +960,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             repos: Vec::new(),
             profiles: BTreeMap::new(),
+            mirror_branches: Vec::new(),
             workspace: dir.path().to_path_buf(),
             overrides: HashMap::new(),
             worktrees: HashMap::new(),
@@ -1025,6 +1045,35 @@ mod tests {
         )
         .unwrap();
         Registry::load_from(root).unwrap()
+    }
+
+    #[test]
+    fn nightly_mirrors_its_remote_unless_the_manifest_says_otherwise() {
+        // A manifest that names no mirror branches still gets the convention.
+        let root = tempfile::TempDir::new().unwrap();
+        std::fs::write(root.path().join(MANIFEST), r#"{"repos":[]}"#).unwrap();
+
+        let reg = Registry::load_from(root.path()).unwrap();
+
+        assert_eq!(reg.mirror_branches, vec!["nightly".to_string()]);
+    }
+
+    #[test]
+    fn a_manifest_can_name_its_own_mirror_branches() {
+        let root = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            root.path().join(MANIFEST),
+            r#"{"repos":[],"mirrorBranches":["snapshot","latest"]}"#,
+        )
+        .unwrap();
+
+        let reg = Registry::load_from(root.path()).unwrap();
+
+        assert_eq!(
+            reg.mirror_branches,
+            vec!["snapshot".to_string(), "latest".to_string()],
+            "naming them replaces the default rather than adding to it"
+        );
     }
 
     #[test]

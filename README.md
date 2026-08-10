@@ -33,7 +33,13 @@ extension uses them. They're command prefixes, not just paths, so they can be bu
 Path resolution: `tilt_config.json` override > `ghq` checkout > sibling dir, where an entry's
 optional `subpath` nests that sibling dir under the workspace base. See `repos --help`.
 
-Optionally, wrap the array in `{"repos": [...], "profiles": {...}}` to name profiles — a
+Wrap the array in `{"repos": [...], ...}` to add registry-wide settings. `mirrorBranches`
+names branches that are rebuilt and force-pushed upstream (default `["nightly"]`): syncing one
+replaces your copy instead of merging, so `repos pull` resets it to the remote and the status
+table drops the `↑` — a rewritten remote leaves its old tip behind as "ahead", which is not a
+commit of yours to push.
+
+Optionally, also add `"profiles": {...}` to name profiles — a
 profile maps to the repo or group names it enables, e.g. `{"frontend": ["web"]}`. Set the
 *persisted* active selection (survives a `tilt up` restart, XDG state) via `repos profile
 set frontend,backend` or the daemon's nav "profiles" button — a checkbox per profile; check
