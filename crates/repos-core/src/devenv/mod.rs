@@ -13,7 +13,7 @@ mod workspace;
 
 pub use branch::{BranchName, CheckoutTarget, DEFAULT_ALIAS, DomainError};
 pub use project::Project;
-pub use workspace::Workspace;
+pub use workspace::{Workspace, unreachable_profiles};
 
 use std::path::PathBuf;
 

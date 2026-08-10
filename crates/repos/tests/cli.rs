@@ -643,6 +643,185 @@ fn status_watch_reprints_only_when_local_state_changes() {
     );
 }
 
+/// Puts a fake `tilt` first on PATH that appends `$REPOS_RESTART_MARKER` to a
+/// log on every run, and — on its first run only — creates that marker, i.e.
+/// does what the daemon's update button does. Returns (bin dir, log path).
+fn fake_tilt(root: &TempDir) -> (TempDir, std::path::PathBuf) {
+    let bin = TempDir::new().unwrap();
+    let log = root.path().join("tilt-runs.txt");
+    let once = root.path().join("restart-requested");
+    // Only shell builtins and redirection: PATH is replaced with just this dir,
+    // so `touch` and friends aren't available.
+    std::fs::write(
+        bin.path().join("tilt"),
+        format!(
+            "#!/bin/sh\n\
+             echo \"$REPOS_RESTART_MARKER\" >> '{log}'\n\
+             if [ ! -e '{once}' ]; then : > '{once}'; : > \"$REPOS_RESTART_MARKER\"; fi\n",
+            log = log.display(),
+            once = once.display(),
+        ),
+    )
+    .unwrap();
+    let script = bin.path().join("tilt");
+    std::fs::set_permissions(
+        &script,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+    (bin, log)
+}
+
+#[test]
+fn up_relaunches_tilt_when_the_daemon_asks_for_a_restart() {
+    let root = fixture(r#"{"repos":[]}"#);
+    let (bin, log) = fake_tilt(&root);
+
+    let out = repos(&root)
+        .arg("up")
+        .env("PATH", bin.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {:?}", out.stderr);
+
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let runs: Vec<&str> = logged
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        runs.len(),
+        2,
+        "one restart requested, so Tilt should start twice: {runs:?}"
+    );
+    assert!(
+        runs.iter().all(|m| m.contains("restart-")),
+        "every run must be told where to drop a restart request: {runs:?}"
+    );
+}
+
+#[test]
+fn up_exits_with_tilt_when_no_restart_is_requested() {
+    let root = fixture(r#"{"repos":[]}"#);
+    let (bin, log) = fake_tilt(&root);
+    // Pre-create the once-marker so the fake tilt never requests a restart.
+    std::fs::write(root.path().join("restart-requested"), "").unwrap();
+
+    let out = repos(&root)
+        .arg("up")
+        .env("PATH", bin.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {:?}", out.stderr);
+
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().count(),
+        1,
+        "without a restart request `repos up` must behave like plain `tilt up`"
+    );
+}
+
+#[test]
+fn every_supervisor_gets_its_own_restart_marker() {
+    // Sharing a marker would let one supervisor consume another's restart, or
+    // delete a request it never made.
+    let a = fixture(r#"{"repos":[]}"#);
+    let (bin_a, log_a) = fake_tilt(&a);
+    std::fs::write(a.path().join("restart-requested"), "").unwrap();
+    let b = fixture(r#"{"repos":[]}"#);
+    let (bin_b, log_b) = fake_tilt(&b);
+    std::fs::write(b.path().join("restart-requested"), "").unwrap();
+
+    for (root, bin) in [(&a, &bin_a), (&b, &bin_b)] {
+        let out = repos(root)
+            .arg("up")
+            .env("PATH", bin.path())
+            .timeout(std::time::Duration::from_secs(30))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "stderr: {:?}", out.stderr);
+    }
+
+    let marker_a = std::fs::read_to_string(&log_a).unwrap().trim().to_string();
+    let marker_b = std::fs::read_to_string(&log_b).unwrap().trim().to_string();
+    assert!(!marker_a.is_empty() && !marker_b.is_empty());
+    assert_ne!(
+        marker_a, marker_b,
+        "two supervisors must never share a marker"
+    );
+}
+
+#[test]
+fn up_clears_a_marker_left_behind_by_a_killed_supervisor() {
+    // Regression: a supervisor killed mid-run leaves its marker on disk. If the
+    // next `repos up` doesn't clear it first, Tilt restarts the instant it
+    // exits — forever.
+    let root = fixture(r#"{"repos":[]}"#);
+    let (bin, log) = fake_tilt(&root);
+    // Pre-create the once-marker so the fake tilt never requests a restart.
+    std::fs::write(root.path().join("restart-requested"), "").unwrap();
+
+    // Learn the marker path this dev-env uses (a hash of its root) from one
+    // ordinary run, then plant it as a killed supervisor would have.
+    repos(&root)
+        .arg("up")
+        .env("PATH", bin.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let marker = logged.lines().next().unwrap().trim();
+    assert!(!marker.is_empty(), "the run should have had a marker path");
+    std::fs::write(marker, "").unwrap();
+    std::fs::remove_file(&log).unwrap();
+
+    let out = repos(&root)
+        .arg("up")
+        .env("PATH", bin.path())
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {:?}", out.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().count(),
+        1,
+        "a stale marker must not trigger a restart"
+    );
+}
+
+#[test]
+fn update_reports_an_already_current_dev_environment() {
+    let (origin, url) = bare_origin_url();
+    let root = TempDir::new().unwrap();
+    repos_core::gittest::git(
+        origin.path(),
+        &["clone", &url, &root.path().to_string_lossy()],
+    );
+    std::fs::write(root.path().join("tilt-devenv.json"), r#"{"repos":[]}"#).unwrap();
+
+    let out = repos(&root).arg("update").output().unwrap();
+
+    assert!(out.status.success(), "stderr: {:?}", out.stderr);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("up to date"));
+}
+
+#[test]
+fn update_explains_itself_when_the_dev_env_is_not_a_git_repo() {
+    let root = fixture(r#"{"repos":[]}"#);
+
+    let out = repos(&root).arg("update").output().unwrap();
+
+    assert!(!out.status.success(), "a non-repo has nothing to update");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("isn't a git repo"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn dynamic_completion_emits_a_shell_script() {
     // The flake's postInstall relies on `COMPLETE=<shell> repos` printing an

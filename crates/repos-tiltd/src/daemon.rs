@@ -18,13 +18,17 @@ use serde::Deserialize;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::MissedTickBehavior;
 
-use repos_core::devenv::{CheckoutTarget, Config, Outcome, Project, Workspace, count_with_outcome};
+use repos_core::devenv::{
+    CheckoutTarget, Config, Outcome, Project, Workspace, count_with_outcome, unreachable_profiles,
+};
 use repos_core::registry::Registry;
+use repos_core::selfupdate::DevEnv;
 use repos_core::tilt::{self as client, Click};
 use repos_core::{git, worktree};
 
 use crate::buttons;
 use crate::debounce::Debouncer;
+use crate::updater;
 
 /// One entry of `REPOS_TILT_SPEC`: the Tilt resource, the repo it shows, that
 /// repo's on-disk path, and its registry group (checkout-all's group filter).
@@ -83,7 +87,7 @@ fn is_worktree_entry(path: &Path) -> bool {
     name_is_worktrees || parent_is_worktrees
 }
 
-pub fn run(poll: Duration) -> Result<()> {
+pub fn run(poll: Duration, self_update: bool) -> Result<()> {
     let spec = std::env::var("REPOS_TILT_SPEC")
         .map_err(|_| anyhow!("REPOS_TILT_SPEC is not set (the Tiltfile passes it)"))?;
     let specs: Vec<WatchSpec> = serde_json::from_str(&spec).context("parsing REPOS_TILT_SPEC")?;
@@ -102,10 +106,10 @@ pub fn run(poll: Duration) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(run_daemon(cfgs, poll))
+    rt.block_on(run_daemon(cfgs, poll, self_update))
 }
 
-async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
+async fn run_daemon(cfgs: Vec<Config>, poll: Duration, self_update: bool) -> Result<()> {
     let ws = Arc::new(Workspace::with_presenter(cfgs, |c| {
         Box::new(buttons::Presenter::new(&c.resource, c.path.clone()))
     }));
@@ -148,7 +152,7 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
     // selected worktree is removed, and for the profile-switcher button's
     // choices (best-effort — no reconciliation if it can't be found).
     let reg = Registry::load()
-        .inspect_err(|e| tracing::warn!(error = %e, "loading registry failed; no worktree-revert or profile button"))
+        .inspect_err(|e| tracing::warn!(error = %e, "couldn't read tilt-devenv.json — the worktree and profile buttons won't work"))
         .ok();
     let root = reg.as_ref().map(|r| r.root.clone());
     let profile_names: Vec<String> = reg
@@ -163,8 +167,6 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
         .as_ref()
         .map(|r| r.active_profile_names())
         .unwrap_or_default();
-    // The active profiles' repo names, for checkout-all's "active profile only"
-    // checkbox.
     let active_profile_repos: Vec<String> = reg
         .as_ref()
         .map(|r| r.active_profiles())
@@ -179,14 +181,35 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
     groups.sort();
     groups.dedup();
 
-    let no_access = reg.as_ref().map(no_access_profiles).unwrap_or_default();
-    render_global(&groups, &profile_names, &active_profiles, &no_access);
+    // One live access check up front — an ls-remote per uncloned repo — so the
+    // picker can leave profiles it can't clone out entirely.
+    let unreachable = reg.as_ref().map(unreachable_profiles).unwrap_or_default();
+    let selectable = reg
+        .as_ref()
+        .map(|r| r.selectable_profiles(&unreachable))
+        .unwrap_or_default();
+    render_global(&groups, &selectable, &active_profiles, profile_names.len());
+
+    // Nothing else fetches the dev-env repo, so it rides the same tick as the
+    // service remotes.
+    let dev_env = self_update
+        .then(|| root.as_deref().and_then(DevEnv::at))
+        .flatten()
+        .map(Arc::new);
+    if let Some(dev) = dev_env.clone() {
+        tracing::info!(root = %dev.root().display(), "watching the dev environment for updates");
+        // Local refs first, so a dev-env already known to be behind shows its
+        // button now rather than a poll interval later.
+        tokio::task::block_in_place(|| updater::refresh_button(&dev, false));
+        tokio::task::spawn_blocking(move || updater::refresh_button(&dev, true));
+    }
 
     let ctx = ClickContext {
         root,
         profile_state,
         active_profile_repos,
         reg,
+        dev_env: dev_env.clone(),
     };
 
     // Button clicks. If watching fails, keep serving status: the sender is held
@@ -194,7 +217,7 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
     let (mut click_rx, _click_watcher, _keep_alive) = match client::watch_clicks() {
         Ok((rx, w)) => (rx, Some(w), None),
         Err(e) => {
-            tracing::warn!(error = %e, "button clicks disabled; still serving status");
+            tracing::warn!(error = %e, "buttons won't respond — couldn't watch for clicks; the status table still updates");
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Click>();
             (rx, None, Some(tx))
         }
@@ -209,6 +232,9 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
 
     let debouncer = Debouncer::new(Duration::from_millis(300));
     let polling = Arc::new(AtomicBool::new(false));
+    // A guard of its own, so a slow repo poll can't delay the dev-env check;
+    // the two share only the tick.
+    let polling_dev_env = Arc::new(AtomicBool::new(false));
 
     tracing::info!(
         repos = ws.projects().len(),
@@ -265,7 +291,10 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
 
             Some(click) = click_rx.recv() => handle_click(&ws, click, &ctx),
 
-            _ = ticker.tick() => poll_remotes(ws.clone(), polling.clone()),
+            _ = ticker.tick() => {
+                poll_remotes(ws.clone(), polling.clone());
+                updater::poll(dev_env.clone(), polling_dev_env.clone());
+            }
         }
     }
 
@@ -280,6 +309,7 @@ async fn run_daemon(cfgs: Vec<Config>, poll: Duration) -> Result<()> {
         }
         let _ = buttons::remove_checkout_all();
         let _ = buttons::remove_profile_button();
+        let _ = buttons::remove_update_button();
     })
     .await;
     Ok(())
@@ -296,6 +326,9 @@ struct ClickContext {
     /// it (best-effort — skipped, so the switch is never blocked, when the
     /// registry couldn't be loaded).
     reg: Option<Registry>,
+    /// The dev-env repo the update button acts on; `None` when self-update is
+    /// off or the dev-env isn't checked into git.
+    dev_env: Option<Arc<DevEnv>>,
 }
 
 /// Dispatches a button press to the matching project's in-process operation, off
@@ -305,14 +338,28 @@ fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
 
     let branch = c.inputs.get("branch").cloned().unwrap_or_default();
     if buttons::is_checkout_all_click(&c.button) {
-        let ws = ws.clone();
         let group: Vec<String> = buttons::checkout_all_group(&c.inputs).into_iter().collect();
-        let names = if buttons::checkout_all_profile_only(&c.inputs) {
-            ctx.active_profile_repos.clone()
-        } else {
-            Vec::new()
-        };
+        let names = ctx.active_profile_repos.clone();
+        // Profiles defined but none picked means nothing is in scope — the same
+        // rule the CLI applies, rather than quietly acting on the whole registry.
+        if ctx
+            .reg
+            .as_ref()
+            .is_some_and(|r| r.is_unscoped(&names, &group, false))
+        {
+            tracing::warn!("no active profile selected; nothing to check out");
+            return;
+        }
+        let ws = ws.clone();
         tokio::task::spawn_blocking(move || checkout_all(&ws, &branch, &names, &group));
+        return;
+    }
+    if buttons::is_update_click(&c.button) {
+        if let Some(dev) = ctx.dev_env.clone() {
+            tokio::task::spawn_blocking(move || updater::apply(&dev));
+        } else {
+            tracing::error!("no dev environment to update");
+        }
         return;
     }
     if buttons::is_profile_click(&c.button) {
@@ -323,7 +370,9 @@ fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
                 switch_profile(&state, &root, reg.as_ref(), &checked)
             });
         } else {
-            tracing::error!("no dev-env root or profile-state path; ignoring profile click");
+            tracing::error!(
+                "couldn't find tilt-devenv.json or a state directory — selection not saved"
+            );
         }
         return;
     }
@@ -347,7 +396,7 @@ fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
         let p = p.clone();
         let selected = c.inputs.get("worktree").cloned().unwrap_or_default();
         let Some(root) = ctx.root.clone() else {
-            tracing::error!("no dev-env root; ignoring worktree click");
+            tracing::error!("couldn't find tilt-devenv.json — nothing switched");
             return;
         };
         tokio::task::spawn_blocking(move || select_worktree(&p, &selected, &root));
@@ -358,12 +407,23 @@ fn checkout(p: &Project, branch: &str) {
     let target = match CheckoutTarget::parse(branch) {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!(repo = p.name(), %e, "ignoring checkout click");
+            tracing::warn!(repo = p.name(), %e, "nothing checked out");
             return;
         }
     };
     let r = p.checkout(&target);
-    tracing::info!(repo = p.name(), %branch, outcome = r.outcome.label(), "checkout");
+    match r.outcome {
+        Outcome::FellBack => tracing::info!(
+            repo = p.name(),
+            %branch,
+            "no such branch here — switched to this repo's default instead"
+        ),
+        Outcome::SkippedDirty => tracing::warn!(
+            repo = p.name(),
+            "uncommitted changes — left on its current branch"
+        ),
+        _ => tracing::info!(repo = p.name(), %branch, outcome = r.outcome.label(), "checkout"),
+    }
     if let Some(e) = r.err {
         tracing::error!(repo = p.name(), error = %e, "checkout failed");
     }
@@ -387,11 +447,11 @@ fn select_worktree(p: &Project, branch: &str, root: &Path) {
     }
     let worktrees = git::worktrees(p.path());
     let Some(wt) = worktrees.iter().find(|w| w.branch == branch) else {
-        tracing::warn!(repo = p.name(), %branch, "no worktree with that branch; ignoring");
+        tracing::warn!(repo = p.name(), %branch, "that worktree is gone — nothing switched");
         return;
     };
     let Some(state) = worktree::state_path() else {
-        tracing::error!("no XDG state dir; can't record worktree selection");
+        tracing::error!("no state directory available — can't remember which worktree you picked");
         return;
     };
     // Store the worktree's git id (stable across move/branch-switch), or clear
@@ -437,17 +497,27 @@ fn revert_removed_worktree(root: &Path, id: &str) {
 /// checkboxes default to `active_profiles`, the persisted selection.
 fn render_global(
     groups: &[String],
-    profile_names: &[String],
+    selectable: &[String],
     active_profiles: &[String],
-    no_access: &[String],
+    defined: usize,
 ) {
     if let Err(e) = buttons::render_checkout_all(groups) {
         tracing::error!(error = %e, "failed to render checkout-all button");
     }
-    if !profile_names.is_empty()
-        && let Err(e) = buttons::render_profile_button(profile_names, active_profiles, no_access)
-    {
-        tracing::error!(error = %e, "failed to render profile button");
+    render_profile_picker(selectable, active_profiles, defined);
+}
+
+/// Shows the profile picker, or hides it when there's nothing to pick — see
+/// [`buttons::selectable_profiles`].
+fn render_profile_picker(selectable: &[String], active: &[String], defined: usize) {
+    match buttons::render_profile_button(selectable, active) {
+        Ok(true) => {}
+        Ok(false) if defined == 0 => {}
+        Ok(false) => tracing::warn!(
+            defined,
+            "no profile picker: every profile reaches a repo this machine can't clone"
+        ),
+        Err(e) => tracing::error!(error = %e, "failed to render profile button"),
     }
 }
 
@@ -461,44 +531,6 @@ fn checked_profiles(inputs: &HashMap<String, String>) -> Vec<String> {
         .collect()
 }
 
-/// The subset of `checked` that individually resolves to any repo in
-/// `unreachable` — so an access-denial log names only the profile(s)
-/// actually responsible, not every profile that happened to be checked in
-/// the same click.
-fn profiles_reaching<'a>(
-    reg: &Registry,
-    checked: &'a [String],
-    unreachable: &[&str],
-) -> Vec<&'a str> {
-    checked
-        .iter()
-        .filter(|p| {
-            reg.resolve_only(&[], std::slice::from_ref(*p))
-                .iter()
-                .any(|r| unreachable.contains(&r.as_str()))
-        })
-        .map(String::as_str)
-        .collect()
-}
-
-/// Every profile that resolves to at least one currently-unreachable repo,
-/// checked live across the *whole* registry — not just what's scoped in —
-/// so the picker can leave them off entirely (see [`buttons::profile_button`])
-/// instead of only refusing to save one after the fact.
-fn no_access_profiles(reg: &Registry) -> Vec<String> {
-    let unreachable: Vec<String> = Workspace::from_registry(reg)
-        .inaccessible()
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-    let unreachable: Vec<&str> = unreachable.iter().map(String::as_str).collect();
-    let names: Vec<String> = reg.profiles.keys().cloned().collect();
-    profiles_reaching(reg, &names, &unreachable)
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-}
-
 /// Persists `checked` as the active profile selection (empty enables every
 /// profile). The Tiltfile watches this file, so saving it triggers the reload
 /// that redefines resources for the new selection — no `tilt args` involved, so
@@ -509,29 +541,31 @@ fn no_access_profiles(reg: &Registry) -> Vec<String> {
 /// selection the next Tiltfile reload can't actually clone.
 fn switch_profile(state: &Path, root: &Path, reg: Option<&Registry>, checked: &[String]) {
     if let Some(reg) = reg {
-        let no_access = no_access_profiles(reg);
+        let unreachable = unreachable_profiles(reg);
         let culprits: Vec<&str> = checked
             .iter()
-            .filter(|p| no_access.contains(p))
+            .filter(|p| unreachable.contains(p))
             .map(String::as_str)
             .collect();
         if !culprits.is_empty() {
             tracing::error!(
                 profiles = ?culprits,
-                "profile selection not saved: one or more profiles reach an inaccessible repo"
+                "profile selection not saved — no access to a repo it needs"
             );
             return;
         }
     }
     match repos_core::profile::set_active(state, root, checked) {
         Ok(()) => {
-            tracing::info!(profiles = ?checked, "profile selection saved");
+            if checked.is_empty() {
+                tracing::info!("profile selection cleared — nothing runs until you pick a profile");
+            } else {
+                tracing::info!(profiles = ?checked, "profile selection saved");
+            }
             if let Some(reg) = reg {
-                let all: Vec<String> = reg.profiles.keys().cloned().collect();
-                let no_access = no_access_profiles(reg);
-                if let Err(e) = buttons::render_profile_button(&all, checked, &no_access) {
-                    tracing::error!(error = %e, "failed to re-render profile button");
-                }
+                let unreachable = unreachable_profiles(reg);
+                let selectable = reg.selectable_profiles(&unreachable);
+                render_profile_picker(&selectable, checked, reg.profiles.len());
             }
         }
         Err(e) => tracing::error!(error = %e, "saving profile selection failed"),
@@ -545,7 +579,7 @@ fn checkout_all(ws: &Workspace, branch: &str, names: &[String], groups: &[String
     let target = match CheckoutTarget::parse(branch) {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!(%e, "ignoring checkout-all click");
+            tracing::warn!(%e, "nothing checked out");
             return;
         }
     };
@@ -608,38 +642,6 @@ mod tests {
     fn checked_profiles_is_empty_when_nothing_is_checked() {
         let inputs = HashMap::from([("frontend".to_string(), "false".to_string())]);
         assert!(checked_profiles(&inputs).is_empty());
-    }
-
-    #[test]
-    fn profiles_reaching_names_only_the_profiles_that_touch_an_unreachable_repo() {
-        let root = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            root.path().join("tilt-devenv.json"),
-            r#"{"repos":[
-                    {"name":"broken","url":"/no/such/remote","group":"g"},
-                    {"name":"fine","url":"u","group":"g"}
-                ],
-                "profiles":{
-                    "bad":["broken"],
-                    "unrelated":["fine"],
-                    "mixed":["broken","fine"]
-                }}"#,
-        )
-        .unwrap();
-        let reg = Registry::load_from(root.path()).unwrap();
-        let checked = vec![
-            "bad".to_string(),
-            "unrelated".to_string(),
-            "mixed".to_string(),
-        ];
-
-        let mut got = profiles_reaching(&reg, &checked, &["broken"]);
-        got.sort();
-        assert_eq!(
-            got,
-            vec!["bad", "mixed"],
-            "unrelated doesn't resolve to the unreachable repo"
-        );
     }
 
     fn broken_repo_registry(root: &std::path::Path) -> Registry {

@@ -295,6 +295,32 @@ impl Registry {
             .collect()
     }
 
+    /// The profiles that resolve to at least one repo in `repos` — so a caller
+    /// can name only the profiles actually responsible for a problem.
+    pub fn profiles_reaching(&self, repos: &[&str]) -> Vec<String> {
+        self.profiles
+            .keys()
+            .filter(|p| {
+                self.resolve_only(&[], std::slice::from_ref(p))
+                    .iter()
+                    .any(|r| repos.contains(&r.as_str()))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The profiles that can actually be activated: every profile except those
+    /// in `unreachable` (see [`crate::devenv::unreachable_profiles`]). Empty
+    /// means there is nothing to pick — either none are defined, or none of
+    /// them resolve to repos this machine can clone.
+    pub fn selectable_profiles(&self, unreachable: &[String]) -> Vec<String> {
+        self.profiles
+            .keys()
+            .filter(|p| !unreachable.contains(p))
+            .cloned()
+            .collect()
+    }
+
     /// Computes the on-disk path for every repo. Priority matches the Tiltfile:
     /// active worktree > per-repo override > ghq checkout > sibling directory.
     pub fn resolve(&self) -> Vec<Resolved> {
@@ -980,5 +1006,75 @@ mod tests {
         for (url, want) in cases {
             assert_eq!(ghq_relpath(url).as_deref(), want, "url={url:?}");
         }
+    }
+
+    /// A registry whose `broken` repo can never be cloned, reached by two of
+    /// its three profiles.
+    fn registry_with_a_broken_repo(root: &Path) -> Registry {
+        std::fs::write(
+            root.join(MANIFEST),
+            r#"{"repos":[
+                    {"name":"broken","url":"/no/such/remote","group":"g"},
+                    {"name":"fine","url":"u","group":"g"}
+                ],
+                "profiles":{
+                    "bad":["broken"],
+                    "unrelated":["fine"],
+                    "mixed":["broken","fine"]
+                }}"#,
+        )
+        .unwrap();
+        Registry::load_from(root).unwrap()
+    }
+
+    #[test]
+    fn profiles_reaching_names_only_the_profiles_that_touch_the_given_repos() {
+        let root = tempfile::TempDir::new().unwrap();
+        let reg = registry_with_a_broken_repo(root.path());
+
+        let mut got = reg.profiles_reaching(&["broken"]);
+        got.sort();
+
+        assert_eq!(
+            got,
+            vec!["bad", "mixed"],
+            "unrelated resolves to no unreachable repo"
+        );
+    }
+
+    #[test]
+    fn profiles_reaching_nothing_names_no_profiles() {
+        let root = tempfile::TempDir::new().unwrap();
+        let reg = registry_with_a_broken_repo(root.path());
+        assert!(reg.profiles_reaching(&[]).is_empty());
+    }
+
+    #[test]
+    fn selectable_profiles_drops_the_unreachable_ones() {
+        let root = tempfile::TempDir::new().unwrap();
+        let reg = registry_with_a_broken_repo(root.path());
+
+        let mut got = reg.selectable_profiles(&["bad".to_string(), "mixed".to_string()]);
+        got.sort();
+
+        assert_eq!(got, vec!["unrelated"]);
+    }
+
+    #[test]
+    fn nothing_is_selectable_when_every_profile_is_unreachable() {
+        let root = tempfile::TempDir::new().unwrap();
+        let reg = registry_with_a_broken_repo(root.path());
+        let all: Vec<String> = reg.profiles.keys().cloned().collect();
+
+        assert!(reg.selectable_profiles(&all).is_empty());
+    }
+
+    #[test]
+    fn nothing_is_selectable_when_the_registry_defines_no_profiles() {
+        let root = tempfile::TempDir::new().unwrap();
+        std::fs::write(root.path().join(MANIFEST), r#"{"repos":[]}"#).unwrap();
+        let reg = Registry::load_from(root.path()).unwrap();
+
+        assert!(reg.selectable_profiles(&[]).is_empty());
     }
 }

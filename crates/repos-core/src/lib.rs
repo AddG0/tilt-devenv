@@ -14,11 +14,17 @@
 //!   adapter) render through.
 //! - [`tilt`] — the low-level Tilt UIButton/UIResource client (the seam both
 //!   frontends drive Tilt through), independent of which buttons a caller shows.
+//! - [`selfupdate`] — keeping the dev-env repo itself current (the one holding
+//!   `tilt-devenv.json`), which nothing else fetches.
+//! - [`supervisor`] — the restart contract between `repos up` and the daemon,
+//!   so updating the dev-env repo itself can relaunch Tilt in the new dev shell.
 
 pub mod devenv;
 pub mod git;
 pub mod profile;
 pub mod registry;
+pub mod selfupdate;
+pub mod supervisor;
 pub mod tilt;
 pub mod worktree;
 

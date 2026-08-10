@@ -1,6 +1,7 @@
 //! The specific buttons the daemon shows in Tilt and what they mean: a branch
-//! picker and a pull button per repo, plus a global checkout-all. Built on the
-//! [`repos_core::tilt`] client seam, which does the actual apply/delete/watch.
+//! picker and a pull button per repo, plus a global checkout-all, profile
+//! switcher, and dev-env update. Built on the [`repos_core::tilt`] client seam,
+//! which does the actual apply/delete/watch.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ const PULL_PREFIX: &str = "repos-pull-";
 const WORKTREE_PREFIX: &str = "repos-worktree-";
 const CHECKOUT_ALL_BUTTON: &str = "repos-checkout-all";
 const PROFILE_BUTTON: &str = "repos-profile";
+const UPDATE_BUTTON: &str = "repos-dev-env-update";
 /// Checkout-all's group dropdown sentinel meaning "every group" (no restriction).
 const ALL_GROUPS: &str = "(all groups)";
 
@@ -164,27 +166,23 @@ fn pull_caption(behind: i32) -> String {
     }
 }
 
-/// The global checkout-all button: type a branch, optionally restrict to one
-/// `group` (dropdown, defaulting to every group) or check "active profile only"
-/// to restrict to the currently active profile's repos instead — by default
-/// (nothing picked, box unchecked) it checks out every repo, unaffected by the
-/// active profile.
+/// The global checkout-all button. "All" means the active profile's repos: the
+/// profile decides what you're working on, so this follows it, as the CLI does.
 fn checkout_all_button(groups: &[String]) -> UiButton {
     let mut group_choices = vec![ALL_GROUPS.to_string()];
     group_choices.extend(groups.iter().cloned());
     UiButton::new(
         CHECKOUT_ALL_BUTTON.to_string(),
-        "⎇ checkout all repos".to_string(),
+        "⎇ checkout all".to_string(),
     )
     .icon("call_split")
     .at("nav", "Global")
     .text_input(
         "branch",
-        "branch for all repos (missing → default)",
+        "branch for every active repo (missing → default)",
         "branch name",
     )
     .choice_input("group", "restrict to group", group_choices)
-    .bool_input("active_profile_only", "restrict to active profile", false)
 }
 
 /// (Re)applies the nav checkout-all button, offering `groups` in its dropdown.
@@ -199,11 +197,6 @@ pub fn checkout_all_group(inputs: &HashMap<String, String>) -> Option<String> {
         Some(g) if !g.is_empty() && g != ALL_GROUPS => Some(g.clone()),
         _ => None,
     }
-}
-
-/// Whether a checkout-all click's "active profile only" checkbox was checked.
-pub fn checkout_all_profile_only(inputs: &HashMap<String, String>) -> bool {
-    inputs.get("active_profile_only").map(String::as_str) == Some("true")
 }
 
 /// Deletes the nav checkout-all button.
@@ -224,24 +217,30 @@ pub fn is_checkout_all_click(button: &str) -> bool {
 /// Checkboxes default to `active` (the persisted selection); check any
 /// number and click to save, which triggers the Tiltfile reload that
 /// redefines resources to match (see the daemon's click handler).
-fn profile_button(names: &[String], active: &[String], no_access: &[String]) -> UiButton {
+fn profile_button(names: &[String], active: &[String]) -> UiButton {
     let mut button = UiButton::new(PROFILE_BUTTON.to_string(), "profiles".to_string())
         .icon("checklist")
         .at("nav", "Global");
-    for name in names.iter().filter(|n| !no_access.contains(n)) {
+    for name in names {
         button = button.bool_input(name, name, active.contains(name));
     }
     button
 }
 
-/// (Re)applies the nav profile-switcher button, offering `names` defaulted to
-/// `active` — see [`profile_button`] for `no_access`.
-pub fn render_profile_button(
-    names: &[String],
-    active: &[String],
-    no_access: &[String],
-) -> Result<()> {
-    client::apply(&profile_button(names, active, no_access))
+/// (Re)applies the nav profile-switcher button: a checkbox per name in
+/// `names`, defaulted to those in `active`. Which profiles are worth offering
+/// is the caller's business.
+///
+/// No names means no button — a picker with no checkboxes isn't a picker, since
+/// its only possible click silently clears the selection. Returns whether the
+/// button is now showing.
+pub fn render_profile_button(names: &[String], active: &[String]) -> Result<bool> {
+    if names.is_empty() {
+        remove_profile_button()?;
+        return Ok(false);
+    }
+    client::apply(&profile_button(names, active))?;
+    Ok(true)
 }
 
 /// Deletes the nav profile-switcher button.
@@ -252,6 +251,86 @@ pub fn remove_profile_button() -> Result<()> {
 /// Reports whether a click came from the nav profile-switcher button.
 pub fn is_profile_click(button: &str) -> bool {
     button == PROFILE_BUTTON
+}
+
+/// The update button's icon. The count is drawn here rather than put in the
+/// label because a nav button always shows its icon, and its text only where
+/// there's room for it.
+///
+/// The viewBox must stay square — Tilt's nav slot is, and it crops a wider icon
+/// rather than scaling it down.
+///
+/// `style` as well as `fill` throughout: Tilt's own CSS rule beats the
+/// presentation attribute alone and would repaint the icon.
+fn update_icon(behind: i32) -> String {
+    // Exact to 999: capping lower would make 10 and 200 look alike.
+    let count = if behind > 999 {
+        "999+".to_string()
+    } else {
+        behind.to_string()
+    };
+    // Grows leftward from a fixed right edge, one step per digit: one digit
+    // keeps the round badge, three still fit. `just icons` draws all three.
+    let (width, font) = match count.chars().count() {
+        1 => (12.4, "8.5"),
+        2 => (16.0, "8"),
+        3 => (21.0, "7"),
+        _ => (24.0, "6"),
+    };
+    let x = BADGE_RIGHT - width;
+    let centre = BADGE_RIGHT - width / 2.0;
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="24" height="24">
+  <circle cx="12" cy="12" r="11" fill="#FCC000" style="fill:#FCC000"/>
+  <path d="M12 6l5.5 6.5h-3.25V18h-4.5v-5.5H6.5z" fill="#1D1D1D" style="fill:#1D1D1D"/>
+  <rect x="{x}" y="14.8" width="{width}" height="12.4" rx="6.2"
+        fill="#1D1D1D" stroke="#FCC000" stroke-width="1.6"
+        style="fill:#1D1D1D;stroke:#FCC000"/>
+  <text x="{centre}" y="21" fill="#FCC000" style="fill:#FCC000" font-size="{font}"
+        font-family="sans-serif" font-weight="bold"
+        text-anchor="middle" dominant-baseline="central">{count}</text>
+</svg>"##
+    )
+}
+
+/// The badge's right edge, just inside the 28-unit viewBox.
+const BADGE_RIGHT: f32 = 27.2;
+
+/// The global dev-env update button.
+///
+/// `restarts` says whether Tilt is supervised (`repos up`) and can relaunch
+/// itself: the label promises only what will actually happen, and confirms
+/// first when the click will tear down every running service.
+fn update_button(behind: i32, restarts: bool) -> UiButton {
+    UiButton::new(UPDATE_BUTTON.to_string(), update_caption(restarts))
+        .icon_svg(&update_icon(behind))
+        .at("nav", "Global")
+        .requires_confirmation(restarts)
+}
+
+/// Short enough to survive the nav bar's width — the icon's badge carries the
+/// count, so the words only have to warn about the disruptive case.
+fn update_caption(restarts: bool) -> String {
+    if restarts {
+        "Update dev env — restarts Tilt".to_string()
+    } else {
+        "Update dev env".to_string()
+    }
+}
+
+/// (Re)applies the nav dev-env update button. See [`update_button`].
+pub fn render_update_button(behind: i32, restarts: bool) -> Result<()> {
+    client::apply(&update_button(behind, restarts))
+}
+
+/// Deletes the nav dev-env update button.
+pub fn remove_update_button() -> Result<()> {
+    client::delete_button(UPDATE_BUTTON)
+}
+
+/// Reports whether a click came from the nav dev-env update button.
+pub fn is_update_click(button: &str) -> bool {
+    button == UPDATE_BUTTON
 }
 
 /// Returns the resource a branch-button click targets.
@@ -347,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_all_is_a_nav_button_with_branch_group_and_profile_inputs() {
+    fn checkout_all_is_a_nav_button_with_branch_and_group_inputs() {
         assert!(is_checkout_all_click("repos-checkout-all"));
         assert!(!is_checkout_all_click("repos-branch-x"));
 
@@ -356,11 +435,11 @@ mod tests {
             "frontend".to_string(),
         ]));
         assert_eq!(v["metadata"]["name"], "repos-checkout-all");
-        assert_eq!(v["spec"]["text"], "⎇ checkout all repos");
+        assert_eq!(v["spec"]["text"], "⎇ checkout all");
         assert_eq!(v["spec"]["location"]["componentType"], "Global");
         assert_eq!(v["spec"]["location"]["componentID"], "nav");
         let inputs = v["spec"]["inputs"].as_array().unwrap();
-        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0]["name"], "branch");
         assert!(inputs[0]["text"].is_object());
         assert_eq!(inputs[1]["name"], "group");
@@ -368,8 +447,6 @@ mod tests {
             inputs[1]["choice"]["choices"],
             serde_json::json!(["(all groups)", "backend", "frontend"])
         );
-        assert_eq!(inputs[2]["name"], "active_profile_only");
-        assert_eq!(inputs[2]["bool"]["defaultValue"], false);
     }
 
     #[test]
@@ -392,25 +469,12 @@ mod tests {
     }
 
     #[test]
-    fn checkout_all_profile_only_reads_the_checkbox() {
-        assert!(checkout_all_profile_only(&HashMap::from([(
-            "active_profile_only".to_string(),
-            "true".to_string()
-        )])));
-        assert!(!checkout_all_profile_only(&HashMap::from([(
-            "active_profile_only".to_string(),
-            "false".to_string()
-        )])));
-        assert!(!checkout_all_profile_only(&HashMap::new()));
-    }
-
-    #[test]
     fn profile_button_is_a_nav_button_with_one_checkbox_per_profile() {
         assert!(is_profile_click("repos-profile"));
         assert!(!is_profile_click("repos-checkout-all"));
 
         let names = ["frontend".to_string(), "backend".to_string()];
-        let v = json(&profile_button(&names, &["backend".to_string()], &[]));
+        let v = json(&profile_button(&names, &["backend".to_string()]));
         assert_eq!(v["metadata"]["name"], "repos-profile");
         assert_eq!(v["spec"]["location"]["componentType"], "Global");
         assert_eq!(v["spec"]["location"]["componentID"], "nav");
@@ -422,15 +486,6 @@ mod tests {
         assert_eq!(inputs[0]["bool"]["defaultValue"], false, "not in active");
         assert_eq!(inputs[1]["name"], "backend");
         assert_eq!(inputs[1]["bool"]["defaultValue"], true, "in active");
-    }
-
-    #[test]
-    fn profile_button_omits_the_no_access_profiles_entirely() {
-        let names = ["frontend".to_string(), "backend".to_string()];
-        let v = json(&profile_button(&names, &[], &["backend".to_string()]));
-        let inputs = v["spec"]["inputs"].as_array().unwrap();
-        assert_eq!(inputs.len(), 1, "backend is left off the picker entirely");
-        assert_eq!(inputs[0]["name"], "frontend");
     }
 
     #[test]
@@ -497,6 +552,155 @@ mod tests {
         assert!(
             !text(json(&linked.worktree_button(&worktrees, "feat/login"))).contains("(main)"),
             "a linked worktree must never be flagged (main)"
+        );
+    }
+
+    #[test]
+    fn update_is_a_nav_button_carrying_its_own_colour() {
+        assert!(is_update_click("repos-dev-env-update"));
+        assert!(!is_update_click("repos-checkout-all"));
+
+        let v = json(&update_button(3, true));
+        assert_eq!(v["metadata"]["name"], "repos-dev-env-update");
+        assert_eq!(v["spec"]["location"]["componentType"], "Global");
+        assert_eq!(v["spec"]["location"]["componentID"], "nav");
+        assert!(
+            v["spec"]["iconSVG"].as_str().unwrap().contains("<svg"),
+            "an inline SVG is the only way to colour a Tilt button"
+        );
+        assert!(v["spec"]["inputs"].is_null(), "nothing to fill in");
+    }
+
+    #[test]
+    fn update_icon_badges_the_pending_commit_count() {
+        assert!(update_icon(3).contains(">3<"), "icon = {}", update_icon(3));
+        assert!(update_icon(42).contains(">42<"));
+    }
+
+    #[test]
+    fn update_icon_caps_the_badge_at_999() {
+        assert!(update_icon(1000).contains(">999+<"));
+        assert!(update_icon(999).contains(">999<"), "999 still fits exactly");
+    }
+
+    /// The badge `<rect>`'s (x, width), read out of a rendered icon.
+    fn badge_box(behind: i32) -> (f32, f32) {
+        let svg = update_icon(behind);
+        let rect = svg
+            .lines()
+            .find(|l| l.trim_start().starts_with("<rect"))
+            .expect("icon has a badge rect");
+        let attr = |name: &str| {
+            rect.split(&format!("{name}=\""))
+                .nth(1)
+                .expect(name)
+                .split('"')
+                .next()
+                .unwrap()
+                .parse::<f32>()
+                .unwrap()
+        };
+        (attr("x"), attr("width"))
+    }
+
+    #[test]
+    fn update_icon_widens_the_badge_one_step_per_digit() {
+        assert!(
+            badge_box(1).1 < badge_box(42).1,
+            "two digits need more room"
+        );
+        assert!(
+            badge_box(42).1 < badge_box(999).1,
+            "three digits, more still"
+        );
+    }
+
+    #[test]
+    fn update_icon_keeps_the_badge_inside_the_viewbox() {
+        // The badge grows leftward precisely so it can't run off the right edge
+        // and be cropped — which is what happened when the whole icon widened.
+        for n in [1, 42, 999, 1000] {
+            let (x, width) = badge_box(n);
+            assert!(x >= 0.0, "badge starts off-canvas at {n}");
+            assert!(x + width <= 28.0, "badge overflows at {n}: {}", x + width);
+        }
+    }
+
+    #[test]
+    fn update_icon_stays_square_whatever_the_count() {
+        // Regression: Tilt's nav slot is square and crops a wider icon instead
+        // of scaling it, so a 34x28 viewBox lost the right-hand digits.
+        let box_of = |n| {
+            update_icon(n)
+                .lines()
+                .next()
+                .unwrap()
+                .split("viewBox=")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .nth(1)
+                .unwrap()
+                .to_string()
+        };
+        for n in [1, 42, 100] {
+            let view_box = box_of(n);
+            let dims: Vec<&str> = view_box.split_whitespace().collect();
+            assert_eq!(dims[2], dims[3], "viewBox must be square for behind={n}");
+        }
+        assert_eq!(box_of(1), box_of(100), "and identical, so nothing reflows");
+    }
+
+    /// Writes one icon per badge width to `target/icons/`, for eyeballing an
+    /// icon change. Ignored by default — it asserts nothing, it just draws.
+    /// `just icons` runs it and rasterises the result.
+    #[test]
+    #[ignore = "preview generator; run it via `just icons`"]
+    fn dump_update_icons() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/icons")
+            .canonicalize()
+            .unwrap_or_else(|_| "target/icons".into());
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in [1, 42, 999] {
+            std::fs::write(dir.join(format!("update-{n}.svg")), update_icon(n)).unwrap();
+        }
+        println!("wrote update-{{1,42,999}}.svg to {}", dir.display());
+    }
+
+    #[test]
+    fn update_caption_stays_short_enough_to_read_in_the_nav() {
+        // The nav truncates: the earlier "dev environment update available ↓1 —
+        // restarts Tilt" was unreadable, which is why the count moved to the icon.
+        for restarts in [true, false] {
+            let got = update_caption(restarts);
+            assert!(got.chars().count() <= 32, "too long to read: {got:?}");
+        }
+    }
+
+    #[test]
+    fn update_confirms_only_when_clicking_it_restarts_tilt() {
+        // Supervised, the click tears down every running service — worth a
+        // confirm. Unsupervised it only pulls, so a confirm is just friction.
+        assert_eq!(
+            json(&update_button(1, true))["spec"]["requiresConfirmation"],
+            true
+        );
+        assert!(
+            json(&update_button(1, false))["spec"]
+                .get("requiresConfirmation")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn update_caption_promises_a_restart_only_when_one_will_happen() {
+        assert!(update_caption(true).contains("restarts Tilt"));
+
+        let unsupervised = update_caption(false);
+        assert!(
+            !unsupervised.contains("restarts Tilt"),
+            "a bare `tilt up` can't restart itself; don't claim it will: {unsupervised}"
         );
     }
 

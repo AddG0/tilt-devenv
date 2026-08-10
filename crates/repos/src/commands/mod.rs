@@ -9,6 +9,8 @@ pub mod profile;
 pub mod profiles;
 pub mod pull;
 pub mod status;
+pub mod up;
+pub mod update;
 pub mod worktree;
 
 use repos_core::devenv::{Outcome, Workspace};

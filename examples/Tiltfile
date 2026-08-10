@@ -1,7 +1,7 @@
 # Demo of the `repos` Tilt extension, runnable in isolation.
 #
 #   ./bootstrap.sh    # create local demo repos + tilt-devenv.json (offline)
-#   tilt up           # from inside `nix develop` (provides `repos` + `tilt`)
+#   repos up          # from inside `nix develop` (provides `repos` + `tilt`)
 #
 # Two profiles are defined in tilt-devenv.json (alpha-only, beta-only), so
 # nothing runs until one is picked — try `repos profile set alpha-only`

@@ -42,18 +42,34 @@ impl UiButton {
             spec: UiButtonSpec {
                 text,
                 icon_name: String::new(),
+                icon_svg: String::new(),
                 location: Location {
                     component_id: String::new(),
                     component_type: String::new(),
                 },
                 inputs: Vec::new(),
                 disabled: false,
+                requires_confirmation: false,
             },
         }
     }
 
     pub fn icon(mut self, name: &str) -> UiButton {
         self.spec.icon_name = name.to_string();
+        self
+    }
+
+    /// An inline `<svg>`, which Tilt gives precedence over [`icon`](Self::icon).
+    /// The only way to colour a button — Tilt offers no colour option.
+    pub fn icon_svg(mut self, svg: &str) -> UiButton {
+        self.spec.icon_svg = svg.to_string();
+        self
+    }
+
+    /// Has Tilt confirm before it delivers the click — declining means no click
+    /// arrives at all.
+    pub fn requires_confirmation(mut self, requires: bool) -> UiButton {
+        self.spec.requires_confirmation = requires;
         self
     }
 
@@ -131,11 +147,18 @@ struct UiButtonSpec {
     text: String,
     #[serde(rename = "iconName", skip_serializing_if = "String::is_empty")]
     icon_name: String,
+    #[serde(rename = "iconSVG", skip_serializing_if = "String::is_empty")]
+    icon_svg: String,
     location: Location,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     inputs: Vec<UiInput>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     disabled: bool,
+    #[serde(
+        rename = "requiresConfirmation",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    requires_confirmation: bool,
 }
 
 #[derive(Serialize)]
@@ -496,6 +519,27 @@ mod tests {
         assert_eq!(inputs[0]["name"], "frontend");
         assert_eq!(inputs[0]["bool"]["defaultValue"], true);
         assert_eq!(inputs[1]["bool"]["defaultValue"], false);
+    }
+
+    #[test]
+    fn icon_svg_and_requires_confirmation_serialize_under_tilts_names() {
+        let btn = UiButton::new("b".to_string(), "text".to_string())
+            .icon_svg("<svg/>")
+            .requires_confirmation(true);
+        let v = serde_json::to_value(&btn).unwrap();
+        assert_eq!(v["spec"]["iconSVG"], "<svg/>");
+        assert_eq!(v["spec"]["requiresConfirmation"], true);
+    }
+
+    #[test]
+    fn icon_svg_and_requires_confirmation_are_omitted_when_unset() {
+        // iconSVG wins over iconName, so an empty-but-present one would blank
+        // out every Material-icon button we have.
+        let btn = UiButton::new("b".to_string(), "text".to_string()).icon("cloud_download");
+        let v = serde_json::to_value(&btn).unwrap();
+        assert!(v["spec"].get("iconSVG").is_none());
+        assert!(v["spec"].get("requiresConfirmation").is_none());
+        assert_eq!(v["spec"]["iconName"], "cloud_download");
     }
 
     #[test]

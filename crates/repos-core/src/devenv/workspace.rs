@@ -10,6 +10,25 @@ pub struct Workspace {
     projects: Vec<Arc<Project>>,
 }
 
+/// Every profile that reaches a repo this machine can't clone, checked live
+/// across the *whole* registry rather than just what's currently scoped in — so
+/// a caller can leave those profiles out of a picker entirely instead of
+/// failing the selection after the fact.
+///
+/// Does network I/O: one `git ls-remote` per not-yet-cloned repo (already
+/// cloned repos are taken as reachable). Cache the result rather than calling
+/// it per profile, and keep it off paths that must work offline — it counts
+/// "couldn't reach" the same as "refused", so offline it names every profile.
+pub fn unreachable_profiles(reg: &Registry) -> Vec<String> {
+    let unreachable: Vec<String> = Workspace::from_registry(reg)
+        .inaccessible()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let unreachable: Vec<&str> = unreachable.iter().map(String::as_str).collect();
+    reg.profiles_reaching(&unreachable)
+}
+
 impl Workspace {
     /// Builds a Workspace from configs, giving each project a presenter from
     /// `view`. Used by the daemon (Tilt adapter).

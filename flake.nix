@@ -64,11 +64,10 @@
             cargoExtraArgs = "-p repos -p repos-tiltd";
             # Tests spawn git to build throwaway repos.
             nativeBuildInputs = [pkgs.installShellFiles pkgs.git];
-            # Ship shell completions (clap dynamic completion) so an importing
-            # devShell picks them up, and install the Tilt extension beside the
-            # binary so a consumer Tiltfile can find it from `repos` on PATH
-            # (<prefix>/bin/repos -> <prefix>/share/repos/tilt/Tiltfile) with no
-            # env var or hard-coded path.
+            # Completions so an importing devShell picks them up. The extension
+            # ships so a consumer pinning this flake can `load()` by path the
+            # exact one its binaries were built from — nothing resolves that
+            # path for them; the documented route is `extension_repo`, from git.
             postInstall = ''
               installShellCompletion --cmd repos \
                 --bash <(COMPLETE=bash $out/bin/repos) \
@@ -177,6 +176,8 @@
             # For exercising the Tilt extension against examples/.
             tilt
             lnav
+            # `just icons` rasterises the nav button's SVG to look at it.
+            librsvg
             # Both binaries on PATH so the example Tiltfile can call them.
             config.packages.repos
           ];

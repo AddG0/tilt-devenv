@@ -23,6 +23,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Start `tilt up` so the dev environment can update and restart itself
+    Up(UpArgs),
+    /// Fast-forward the dev environment itself (the repo holding tilt-devenv.json)
+    Update,
     /// Clone every repo not yet on disk (idempotent)
     Clone(CloneArgs),
     /// Show current branch, dirty state, and ahead/behind for every repo
@@ -42,6 +46,20 @@ pub enum Command {
     Logs(LogsArgs),
     /// Inspect the active per-repo worktree selection
     Worktree(WorktreeArgs),
+}
+
+#[derive(Args)]
+pub struct UpArgs {
+    /// Run `tilt` directly instead of through `nix develop` at the dev-env root
+    #[arg(long)]
+    pub no_nix: bool,
+    /// Extra arguments for `tilt up`, e.g. `repos up -- --stream`
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "TILT_ARGS"
+    )]
+    pub tilt_args: Vec<String>,
 }
 
 #[derive(Args)]
