@@ -65,9 +65,9 @@
             # Tests spawn git to build throwaway repos.
             nativeBuildInputs = [pkgs.installShellFiles pkgs.git];
             # Completions so an importing devShell picks them up. The extension
-            # ships so a consumer pinning this flake can `load()` by path the
-            # exact one its binaries were built from — nothing resolves that
-            # path for them; the documented route is `extension_repo`, from git.
+            # ships beside the binary — `../share/repos/tilt/Tiltfile` from
+            # `command -v repos` — so one PATH lookup resolves both, and the
+            # extension can never drift from the binaries it drives.
             postInstall = ''
               installShellCompletion --cmd repos \
                 --bash <(COMPLETE=bash $out/bin/repos) \
