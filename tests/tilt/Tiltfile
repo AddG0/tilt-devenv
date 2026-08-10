@@ -96,5 +96,5 @@ os.putenv('REPOS_TILTD_BIN', 'shim-tiltd')
 if sorted([r.name for r in repos_resolve(clone_missing=False)]) != ['alpha', 'beta']:
     fail('repos_resolve through $REPOS_BIN did not resolve the registry')
 
-# The status UI must create exactly the repos-branches daemon + git-status table.
+# The status UI must create exactly the repos-controls daemon + git-status table.
 repos_status_ui({name: name for name in repos}, repos, labels=['repos'])

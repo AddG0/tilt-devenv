@@ -72,6 +72,13 @@ pub struct WorktreeArgs {
 pub enum WorktreeCmd {
     /// Print the worktree-selection state file's path (the Tiltfile watches it)
     StatePath,
+    /// Point a repo at the worktree holding <branch> (its main checkout clears the selection)
+    Use {
+        #[arg(add = ArgValueCompleter::new(complete_repo_name))]
+        repo: String,
+        #[arg(add = ArgValueCompleter::new(complete_branch_name))]
+        branch: String,
+    },
 }
 
 #[derive(Args)]

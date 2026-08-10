@@ -91,7 +91,7 @@ if err:
     sys.exit(1)
 
 names = sorted((m.get("Name") or m.get("name")) for m in data.get("Manifests", []))
-want = sorted(["alpha", "beta", "repos-branches", "git-status"])
+want = sorted(["alpha", "beta", "repos-controls", "git-status"])
 if names != want:
     print("FAIL: resources %r, want %r" % (names, want), file=sys.stderr)
     sys.exit(1)
@@ -110,7 +110,7 @@ serve = {
     for m in data.get("Manifests", [])
 }
 for name, want_cmd in [("git-status", "%s status --watch" % sys.argv[2]),
-                       ("repos-branches", "shim-tiltd")]:
+                       ("repos-controls", "shim-tiltd")]:
     if serve.get(name) != want_cmd:
         print("FAIL: %s serve_cmd = %r, want %r" % (name, serve.get(name), want_cmd), file=sys.stderr)
         sys.exit(1)

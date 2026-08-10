@@ -446,39 +446,20 @@ fn pull(p: &Project) {
     }
 }
 
-/// Records the picked worktree as the active selection for the repo. `branch` is
-/// the dropdown value; selecting the main checkout clears the selection (back to
-/// the repo's default path). The Tiltfile watches the selection file, so writing
-/// it triggers the reload that restarts the resource at the new path.
+/// Records the picked worktree, which trips the Tiltfile reload that restarts
+/// the resource at the new path. An empty `branch` is Tilt re-sending the
+/// dropdown's initial state, not a choice.
 fn select_worktree(p: &Project, branch: &str, root: &Path) {
     if branch.is_empty() {
         return;
     }
-    let worktrees = git::worktrees(p.path());
-    let Some(wt) = worktrees.iter().find(|w| w.branch == branch) else {
-        tracing::warn!(repo = p.name(), %branch, "that worktree is gone — nothing switched");
-        return;
-    };
     let Some(state) = worktree::state_path() else {
         tracing::error!("no state directory available — can't remember which worktree you picked");
         return;
     };
-    // Store the worktree's git id (stable across move/branch-switch), or clear
-    // for the main checkout. The registry resolves the id back to a path.
-    let selection = if wt.is_main {
-        None
-    } else {
-        match git::worktree_id(&wt.path) {
-            Some(id) => Some(id),
-            None => {
-                tracing::warn!(repo = p.name(), %branch, "could not determine worktree id; ignoring");
-                return;
-            }
-        }
-    };
-    match worktree::set_selection(&state, root, p.name(), selection.as_deref()) {
-        Ok(()) => tracing::info!(repo = p.name(), %branch, main = wt.is_main, "worktree selected"),
-        Err(e) => tracing::error!(repo = p.name(), error = %e, "recording worktree failed"),
+    match worktree::select(&state, root, p.name(), p.path(), branch) {
+        Ok(sel) => tracing::info!(repo = p.name(), %branch, ?sel, "worktree selected"),
+        Err(e) => tracing::warn!(repo = p.name(), %branch, error = %e, "nothing switched"),
     }
 }
 

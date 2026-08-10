@@ -166,10 +166,10 @@ def repos_status_ui(
         labels=None,
         self_update=True):
     """
-    Creates two long-lived resources: `repos-branches` (branch/pull buttons
-    and checkout-all — the only one of the two that fetches remotes) and
-    `git-status` (a live status table that only reads local git state, so it
-    can't race that fetch).
+    Creates two long-lived resources: `repos-controls` (every button — branch,
+    pull, worktree, checkout-all, profiles, dev-env update — and the only one of
+    the two that fetches remotes) and `git-status` (a live status table that
+    only reads local git state, so it can't race that fetch).
 
     `branch_resources` maps a Tilt resource name to the repo name (a key in
     `repos`). `status_links` are extra `link()`s for the status pane.
@@ -185,7 +185,7 @@ def repos_status_ui(
         for res, repo in branch_resources.items()
     ]
     local_resource(
-        'repos-branches',
+        'repos-controls',
         serve_cmd=repos_tiltd_bin() if self_update else (
             '%s --no-self-update' % repos_tiltd_bin()
         ),

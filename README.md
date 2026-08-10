@@ -110,7 +110,7 @@ shell to re-enter. Turn the whole thing off with `repos_status_ui(..., self_upda
 | --- | --- |
 | `repos_load(clone_missing=True)` | Resolve registry → `{name: struct(name, url, group, path, present)}`. `clone_missing` runs `repos clone` first (scoped to the active profile — see above), a full registry inventory either way. |
 | `repos_resolve(clone_missing=True)` | Same, as a list in `tilt-devenv.json` order. |
-| `repos_status_ui(branch_resources, repos, status_links=[], rust_log=…, deps=[], labels=None, self_update=True)` | `repos-branches` daemon + `git-status` table. `self_update` also watches the dev-env repo itself and offers the nav update button. |
+| `repos_status_ui(branch_resources, repos, status_links=[], rust_log=…, deps=[], labels=None, self_update=True)` | `repos-controls` daemon + `git-status` table. `self_update` also watches the dev-env repo itself and offers the nav update button. |
 | `repos_bin()` / `repos_tiltd_bin()` | The configured invocations: `$REPOS_BIN` (default `repos`), `$REPOS_TILTD_BIN` (default `repos-tiltd`). |
 | `repos_browse_url(remote)` | git remote (scp/ssh/https) → browsable `https://host/path`. |
 | `repos_link(remote, label='Repo')` | Tilt `link` to that URL. |

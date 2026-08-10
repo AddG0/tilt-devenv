@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+
+use crate::git;
 
 /// The default state file: `$XDG_STATE_HOME/repos/worktrees.json`, falling back
 /// to the data dir on platforms without a state dir (macOS/Windows). `None` when
@@ -31,6 +33,44 @@ pub fn ensure_exists(file: &Path) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     std::fs::write(file, b"{}\n").with_context(|| format!("creating {}", file.display()))
+}
+
+/// Which checkout a repo ended up pointed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selected {
+    /// A linked worktree, recorded by git id.
+    Worktree,
+    /// The repo's primary checkout — recorded by clearing the selection, so
+    /// path resolution falls back to its normal answer.
+    MainCheckout,
+}
+
+/// Points `repo` at whichever of its worktrees holds `branch`, and records it.
+///
+/// Stores the worktree's git id rather than its path: the id survives the
+/// worktree being moved or switched to another branch, and the registry
+/// resolves it back to a path.
+pub fn select(
+    state: &Path,
+    root: &Path,
+    repo: &str,
+    repo_path: &Path,
+    branch: &str,
+) -> Result<Selected> {
+    let worktrees = git::worktrees(repo_path);
+    let wt = worktrees
+        .iter()
+        .find(|w| w.branch == branch)
+        .ok_or_else(|| anyhow!("{repo} has no worktree on {branch} any more"))?;
+
+    if wt.is_main {
+        set_selection(state, root, repo, None)?;
+        return Ok(Selected::MainCheckout);
+    }
+    let id = git::worktree_id(&wt.path)
+        .ok_or_else(|| anyhow!("couldn't read the git id of {}", wt.path.display()))?;
+    set_selection(state, root, repo, Some(&id))?;
+    Ok(Selected::Worktree)
 }
 
 /// dev-env root -> (repo name -> selected worktree path).
@@ -87,6 +127,66 @@ fn save(file: &Path, state: &State) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A repo with one linked worktree on `feature`, plus its state file.
+    fn repo_with_a_worktree() -> (TempDir, TempDir) {
+        crate::gittest::isolate();
+        let repo = crate::gittest::init_repo();
+        let wt = TempDir::new().unwrap();
+        crate::gittest::git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                &wt.path().join("w").to_string_lossy(),
+            ],
+        );
+        (repo, wt)
+    }
+
+    #[test]
+    fn selecting_a_worktree_records_it_by_git_id_not_path() {
+        // The id survives the worktree being moved or put on another branch;
+        // a path wouldn't.
+        let (repo, _wt) = repo_with_a_worktree();
+        let file = repo.path().join("state.json");
+        let root = Path::new("/dev/env");
+
+        let got = select(&file, root, "app", repo.path(), "feature").unwrap();
+
+        assert_eq!(got, Selected::Worktree);
+        let id = selections(&file, root)["app"].clone();
+        assert!(!id.contains('/'), "recorded a git id, not a path: {id:?}");
+    }
+
+    #[test]
+    fn selecting_the_main_checkout_clears_the_selection() {
+        let (repo, _wt) = repo_with_a_worktree();
+        let file = repo.path().join("state.json");
+        let root = Path::new("/dev/env");
+        select(&file, root, "app", repo.path(), "feature").unwrap();
+
+        let got = select(&file, root, "app", repo.path(), "main").unwrap();
+
+        assert_eq!(got, Selected::MainCheckout);
+        assert!(
+            !selections(&file, root).contains_key("app"),
+            "cleared, so path resolution falls back to its normal answer"
+        );
+    }
+
+    #[test]
+    fn selecting_a_branch_with_no_worktree_fails_rather_than_recording_nothing() {
+        let (repo, _wt) = repo_with_a_worktree();
+        let file = repo.path().join("state.json");
+
+        let err = select(&file, Path::new("/dev/env"), "app", repo.path(), "gone")
+            .expect_err("no worktree holds that branch");
+
+        assert!(format!("{err:#}").contains("no worktree"), "{err:#}");
+    }
 
     #[test]
     fn set_get_and_clear_roundtrip() {
