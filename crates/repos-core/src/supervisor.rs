@@ -33,8 +33,8 @@ pub fn marker() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Where this supervisor keeps its restart marker: `<state dir>/repos/`,
-/// alongside the worktree and profile state.
+/// Where this supervisor keeps its restart marker: the
+/// [state dir](crate::state::dir), alongside the worktree and profile state.
 ///
 /// Keyed by process id, so any number of supervisors can run at once — several
 /// dev environments, or the same one twice — without reading each other's
@@ -43,10 +43,8 @@ pub fn marker() -> Option<PathBuf> {
 /// Falls back to the temp dir rather than failing: `repos up` is still worth
 /// running where a restart could never work.
 pub fn marker_path() -> PathBuf {
-    let base = dirs::state_dir()
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("repos")
+    crate::state::dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("repos"))
         .join(format!("restart-{}", std::process::id()))
 }
 

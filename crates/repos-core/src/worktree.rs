@@ -14,12 +14,10 @@ use anyhow::{Context, Result, anyhow};
 
 use crate::git;
 
-/// The default state file: `$XDG_STATE_HOME/repos/worktrees.json`, falling back
-/// to the data dir on platforms without a state dir (macOS/Windows). `None` when
-/// neither is resolvable.
+/// The default state file: `worktrees.json` in the [state dir](crate::state::dir).
+/// `None` when that doesn't resolve.
 pub fn state_path() -> Option<PathBuf> {
-    let base = dirs::state_dir().or_else(dirs::data_dir)?;
-    Some(base.join("repos").join("worktrees.json"))
+    Some(crate::state::dir()?.join("worktrees.json"))
 }
 
 /// Ensures the state file (and its parent dir) exists, writing an empty

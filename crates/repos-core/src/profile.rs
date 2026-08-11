@@ -13,12 +13,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// The default state file: `$XDG_STATE_HOME/repos/profiles.json`, falling back
-/// to the data dir on platforms without a state dir (macOS/Windows). `None` when
-/// neither is resolvable.
+/// The default state file: `profiles.json` in the [state dir](crate::state::dir).
+/// `None` when that doesn't resolve.
 pub fn state_path() -> Option<PathBuf> {
-    let base = dirs::state_dir().or_else(dirs::data_dir)?;
-    Some(base.join("repos").join("profiles.json"))
+    Some(crate::state::dir()?.join("profiles.json"))
 }
 
 /// Ensures the state file (and its parent dir) exists, writing an empty

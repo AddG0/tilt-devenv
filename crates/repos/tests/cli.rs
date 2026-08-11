@@ -354,6 +354,30 @@ fn profile_active_persists_across_invocations_and_clears() {
 }
 
 #[test]
+fn state_is_written_under_xdg_state_home_on_every_platform() {
+    let root = fixture(
+        r#"{"repos":[{"name":"web","url":"u","group":"frontend"}],
+            "profiles":{"frontend":["web"]}}"#,
+    );
+
+    repos(&root)
+        .args(["profile", "set", "frontend"])
+        .assert()
+        .success();
+
+    // Trivially true on Linux, where `dirs` reads XDG_STATE_HOME for us; on
+    // every other platform it's the only thing keeping state out of `$HOME`.
+    assert!(
+        root.path()
+            .join(".state")
+            .join("repos")
+            .join("profiles.json")
+            .exists(),
+        "state belongs under XDG_STATE_HOME, not the platform default"
+    );
+}
+
+#[test]
 fn clone_json_reports_cloned_and_already_present() {
     let (_origin, url) = bare_origin_url();
     let root = fixture(&format!(
