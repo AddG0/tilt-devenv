@@ -264,7 +264,7 @@ fn update_icon(behind: i32) -> String {
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="24" height="24">
   <circle cx="12" cy="12" r="11" fill="#FCC000" style="fill:#FCC000"/>
-  <path d="M12 6l5.5 6.5h-3.25V18h-4.5v-5.5H6.5z" fill="#1D1D1D" style="fill:#1D1D1D"/>
+  <path d="M12 18l5.5-6.5h-3.25V6h-4.5v5.5H6.5z" fill="#1D1D1D" style="fill:#1D1D1D"/>
   <rect x="{x}" y="14.8" width="{width}" height="12.4" rx="6.2"
         fill="#1D1D1D" stroke="#FCC000" stroke-width="1.6"
         style="fill:#1D1D1D;stroke:#FCC000"/>
