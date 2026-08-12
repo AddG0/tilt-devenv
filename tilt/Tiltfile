@@ -8,7 +8,8 @@
 #     repos_status_ui({'my-service': 'my-service-repo'}, repos)
 #
 # For profile-gated resources, also load `repos_profiles_load`,
-# `repos_active_profiles`, and `repos_enabled`. See their docstrings
+# `repos_active_profiles`, and `repos_enabled` — plus `profile_enabled` where a
+# resource belongs to a profile rather than to one repo. See their docstrings
 # below.
 #
 # Requires `repos` and `repos-tiltd` on PATH. Get them from the Nix flake, or
@@ -91,7 +92,8 @@ def repos_active_profiles():
     """
     The persisted active profile selection.
 
-    Empty means every profile is enabled.
+    Empty means none picked yet, read as nothing enabled — unless no profiles are
+    declared at all, when there is nothing to scope to.
 
     Watches its state file, so picking a profile reloads the Tiltfile and
     redefines resources to match.
@@ -123,6 +125,16 @@ def repos_enabled(repo, profiles, active):
         repo.name in profiles.get(p, []) or repo.group in profiles.get(p, [])
         for p in active
     ])
+
+def profile_enabled(name, profiles, active):
+    """
+    True if profile `name` is active — the stack-level counterpart to
+    `repos_enabled`, for resources whose repo several profiles enable. Same
+    empty-`profiles` rule. `profiles`/`active` are passed in, not read here.
+    """
+    if not profiles:
+        return True
+    return name in active
 
 def repos_browse_url(remote):
     """

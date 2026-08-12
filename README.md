@@ -117,6 +117,7 @@ shell to re-enter. Turn the whole thing off with `repos_status_ui(..., self_upda
 | `repos_profiles_load()` | Resolve `tilt-devenv.json`'s `profiles` → `{name: [repo-or-group, ...]}`. |
 | `repos_active_profiles()` | The persisted active profile selection (empty = none picked yet); watches it for changes. |
 | `repos_enabled(repo, profiles, active)` | Whether `repo` belongs to any of `active` profiles. True with no `active` only when `profiles` is empty (nothing to scope to). |
+| `profile_enabled(name, profiles, active)` | Whether profile `name` is active — for resources that belong to a *stack* rather than to one repo, e.g. where a single checkout serves two profiles. Same empty-`profiles` rule as `repos_enabled`. |
 
 ## Demo
 

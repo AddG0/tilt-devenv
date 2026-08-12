@@ -13,29 +13,29 @@ allow_k8s_contexts(k8s_context())
 
 load('../../tilt/Tiltfile', 'repos_load', 'repos_resolve', 'repos_status_ui', 'repos_browse_url',
      'repos_link', 'repos_profiles_load', 'repos_active_profiles', 'repos_enabled',
-     'repos_bin', 'repos_tiltd_bin')
+     'profile_enabled', 'repos_bin', 'repos_tiltd_bin')
 
 # Unit assertions for repos_browse_url (pure remote -> browsable URL parser).
 def _eq(got, want, msg):
     if got != want:
-        fail('repos_browse_url %s: got %r, want %r' % (msg, got, want))
+        fail('%s: got %r, want %r' % (msg, got, want))
 
 _eq(repos_browse_url('git@gitlab.com:acme/foo.git'),
-    'https://gitlab.com/acme/foo', 'scp-ssh')
+    'https://gitlab.com/acme/foo', 'repos_browse_url scp-ssh')
 _eq(repos_browse_url('git@github.com:acme/group/foo.git'),
-    'https://github.com/acme/group/foo', 'scp-ssh nested path')
+    'https://github.com/acme/group/foo', 'repos_browse_url scp-ssh nested path')
 _eq(repos_browse_url('gitlab.com:acme/foo.git'),
-    'https://gitlab.com/acme/foo', 'scp-ssh no user')
+    'https://gitlab.com/acme/foo', 'repos_browse_url scp-ssh no user')
 _eq(repos_browse_url('ssh://git@gitlab.com/acme/foo.git'),
-    'https://gitlab.com/acme/foo', 'ssh://')
+    'https://gitlab.com/acme/foo', 'repos_browse_url ssh://')
 _eq(repos_browse_url('ssh://git@host.example.com:2222/acme/foo.git'),
-    'https://host.example.com/acme/foo', 'ssh:// with port')
+    'https://host.example.com/acme/foo', 'repos_browse_url ssh:// with port')
 _eq(repos_browse_url('https://gitlab.com/acme/foo.git'),
-    'https://gitlab.com/acme/foo', 'https with .git')
+    'https://gitlab.com/acme/foo', 'repos_browse_url https with .git')
 _eq(repos_browse_url('https://gitlab.com/acme/foo'),
-    'https://gitlab.com/acme/foo', 'https without .git')
+    'https://gitlab.com/acme/foo', 'repos_browse_url https without .git')
 _eq(repos_browse_url('https://user@github.com/acme/foo.git'),
-    'https://github.com/acme/foo', 'https with userinfo')
+    'https://github.com/acme/foo', 'repos_browse_url https with userinfo')
 
 _l = repos_link('git@gitlab.com:acme/foo.git', 'Src')
 _eq(_l.url, 'https://gitlab.com/acme/foo', 'repos_link url')
@@ -43,17 +43,31 @@ _eq(_l.url, 'https://gitlab.com/acme/foo', 'repos_link url')
 # Unit assertions for repos_enabled (pure membership check).
 _pf = {'frontend': ['web', 'design-system'], 'backend': ['auth']}
 _eq(repos_enabled(struct(name='web', group='ui'), _pf, ['frontend']),
-    True, 'enabled by name')
+    True, 'repos_enabled enabled by name')
 _eq(repos_enabled(struct(name='web', group='ui'), _pf, ['backend']),
-    False, 'not enabled under an unrelated profile')
+    False, 'repos_enabled not enabled under an unrelated profile')
 _eq(repos_enabled(struct(name='other', group='ui'), _pf, ['frontend', 'backend']),
-    False, 'unlisted repo stays disabled')
+    False, 'repos_enabled unlisted repo stays disabled')
 _eq(repos_enabled(struct(name='web', group='ui'), {'ui-team': ['ui']}, ['ui-team']),
-    True, 'enabled by group')
+    True, 'repos_enabled enabled by group')
 _eq(repos_enabled(struct(name='other', group='ui'), _pf, []),
-    False, 'empty active means none enabled yet, when profiles exist')
+    False, 'repos_enabled empty active means none enabled yet, when profiles exist')
 _eq(repos_enabled(struct(name='other', group='ui'), {}, []),
-    True, 'no profiles defined means nothing to scope to')
+    True, 'repos_enabled no profiles defined means nothing to scope to')
+
+# Unit assertions for profile_enabled (is the *stack* in scope, not the repo).
+_eq(profile_enabled('frontend', _pf, ['frontend']),
+    True, 'profile_enabled active profile is enabled')
+_eq(profile_enabled('frontend', _pf, ['backend']),
+    False, 'profile_enabled inactive profile is not enabled')
+_eq(profile_enabled('frontend', _pf, ['backend', 'frontend']),
+    True, 'profile_enabled enabled among several active profiles')
+_eq(profile_enabled('nonexistent', _pf, ['frontend']),
+    False, 'profile_enabled unknown profile name stays disabled')
+_eq(profile_enabled('frontend', _pf, []),
+    False, 'profile_enabled empty active means none enabled yet, when profiles exist')
+_eq(profile_enabled('frontend', {}, []),
+    True, 'profile_enabled no profiles defined means nothing to scope to, as for repos_enabled')
 
 # run.sh clears both env vars, so these are the unset defaults.
 _eq(repos_bin(), 'repos', 'repos_bin default')
