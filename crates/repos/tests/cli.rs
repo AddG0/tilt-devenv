@@ -1,7 +1,10 @@
 //! End-to-end tests that exec the `repos` binary and lock the `--json` output
 //! contract the Tiltfile depends on (field shape + exact formatting).
 
+use std::io::Read;
 use std::process::Command as StdCommand;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use tempfile::TempDir;
@@ -631,8 +634,64 @@ fn status_watch_rejects_json() {
         .stderr(predicates::str::contains("--watch"));
 }
 
+/// Kills a spawned child on the way out, so a failed assertion can't leave an
+/// orphaned `--watch` process polling forever.
+struct Kill(std::process::Child);
+
+impl Drop for Kill {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Drains a child's stdout into a buffer the test can poll while it still runs.
+fn drain(mut pipe: std::process::ChildStdout) -> Arc<Mutex<Vec<u8>>> {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buf);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            sink.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+    buf
+}
+
+fn drained(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
+}
+
+/// The STATE cell of each status table printed so far — one entry per printout.
+fn printed_states(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<String> {
+    drained(buf)
+        .lines()
+        .filter(|l| l.contains("| repo ")) // the data row, not the REPO header
+        .map(|l| l.rsplit('|').nth(1).unwrap_or_default().trim().to_owned())
+        .collect()
+}
+
+/// Blocks until the watcher has printed `want` tables. Waiting on output rather
+/// than on a sleep is what survives a machine where a tick outruns the interval.
+fn wait_for_tables(buf: &Arc<Mutex<Vec<u8>>>, want: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while printed_states(buf).len() < want {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {want} printouts, got {:?}",
+            printed_states(buf)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn status_watch_reprints_only_when_local_state_changes() {
+    const INTERVAL: Duration = Duration::from_millis(50);
+
     let root = fixture(r#"[{"name":"repo","url":"u","group":"g"}]"#);
     let repo_path = root.path().join("repo");
     std::fs::create_dir_all(&repo_path).unwrap();
@@ -648,22 +707,25 @@ fn status_watch_reprints_only_when_local_state_changes() {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    let out = drain(child.stdout.take().unwrap());
+    let _watcher = Kill(child);
 
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Each wait spans several ticks, so it doubles as the window in which a
+    // watcher that reprinted unconditionally would betray itself.
+    wait_for_tables(&out, 1);
     repos_core::gittest::write(&repo_path, "dirty.txt", "x");
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    child.kill().unwrap();
-    let stdout = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned();
+    wait_for_tables(&out, 2);
+    std::fs::remove_file(repo_path.join("dirty.txt")).unwrap();
+    wait_for_tables(&out, 3);
 
+    // Idle ticks after the last transition must add nothing. A slow machine
+    // fits fewer ticks in here, which can only under-count — never flake.
+    std::thread::sleep(10 * INTERVAL);
     assert_eq!(
-        stdout.matches("clean").count(),
-        1,
-        "one printout before the mutation:\n{stdout}"
-    );
-    assert_eq!(
-        stdout.matches("dirty").count(),
-        1,
-        "one printout after the mutation, not one per interval tick:\n{stdout}"
+        printed_states(&out),
+        ["clean", "dirty", "clean"],
+        "one printout per state change, not one per interval tick:\n{}",
+        drained(&out)
     );
 }
 
