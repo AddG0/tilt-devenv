@@ -175,19 +175,10 @@ async fn run_daemon(
         .as_ref()
         .map(|r| r.active_profile_names())
         .unwrap_or_default();
-    let active_profile_repos: Vec<String> = reg
-        .as_ref()
-        .map(|r| r.active_profiles())
-        .unwrap_or_default();
-
-    let mut groups: Vec<String> = ws
-        .projects()
-        .iter()
-        .map(|p| p.group().to_string())
-        .filter(|g| !g.is_empty())
-        .collect();
-    groups.sort();
-    groups.dedup();
+    // Checkout-all intersects the picked group with the selection, so offering a
+    // group outside it would check out nothing — and the Tiltfile may well
+    // declare a resource per registry repo, whatever the selection.
+    let groups = ws.filter(&active_repos(reg.as_ref()), &[]).groups();
 
     // One live access check up front — an ls-remote per uncloned repo — so the
     // picker can leave profiles it can't clone out entirely.
@@ -215,7 +206,6 @@ async fn run_daemon(
     let ctx = ClickContext {
         root,
         profile_state,
-        active_profile_repos,
         reg,
         dev_env: dev_env.clone(),
     };
@@ -312,8 +302,8 @@ async fn run_daemon(
     debouncer.stop();
     let ws = ws.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        for p in ws.projects() {
-            let _ = p.retire();
+        for (repo, e) in ws.retire_all() {
+            tracing::warn!(repo, error = %e, "couldn't remove a repo's buttons on shutdown");
         }
         let _ = buttons::remove_global();
     })
@@ -325,10 +315,8 @@ async fn run_daemon(
 struct ClickContext {
     root: Option<PathBuf>,
     profile_state: Option<PathBuf>,
-    /// The active profiles' repo names, for checkout-all's "active profile
-    /// only" checkbox.
-    active_profile_repos: Vec<String>,
-    /// For checking access to a newly-picked profile's repos before saving
+    /// For resolving the active profiles' repo names (checkout-all's scope) and
+    /// for checking access to a newly-picked profile's repos before saving
     /// it (best-effort — skipped, so the switch is never blocked, when the
     /// registry couldn't be loaded).
     reg: Option<Registry>,
@@ -349,7 +337,7 @@ fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
     match action {
         Action::CheckoutAll { branch, group } => {
             let group: Vec<String> = group.into_iter().collect();
-            let names = ctx.active_profile_repos.clone();
+            let names = active_repos(ctx.reg.as_ref());
             // Profiles defined but none picked means nothing is in scope — the
             // same rule the CLI applies, rather than quietly acting on the
             // whole registry.
@@ -375,8 +363,9 @@ fn handle_click(ws: &Arc<Workspace>, c: Click, ctx: &ClickContext) {
         Action::SetProfiles(checked) => match (ctx.root.clone(), ctx.profile_state.clone()) {
             (Some(root), Some(state)) => {
                 let reg = ctx.reg.clone();
+                let ws = ws.clone();
                 tokio::task::spawn_blocking(move || {
-                    switch_profile(&state, &root, reg.as_ref(), &checked)
+                    switch_profile(&ws, &state, &root, reg.as_ref(), &checked)
                 });
             }
             _ => tracing::error!(
@@ -482,6 +471,14 @@ fn revert_removed_worktree(root: &Path, id: &str) {
     }
 }
 
+/// The repo names the persisted profile selection reaches (empty restricts
+/// nothing — see [`Registry::active_profiles`]). Never cached: a profile switch
+/// restarts the daemon only when it changes the Tiltfile's resource list, which
+/// a Tiltfile listing every registry repo never does.
+fn active_repos(reg: Option<&Registry>) -> Vec<String> {
+    reg.map(|r| r.active_profiles()).unwrap_or_default()
+}
+
 /// Draws the nav checkout-all button (offering `groups` in its dropdown), plus
 /// the profile-switcher button when `profile_names` is non-empty — its
 /// checkboxes default to `active_profiles`, the persisted selection.
@@ -519,7 +516,16 @@ fn render_profile_picker(selectable: &[String], active: &[String], defined: usiz
 /// Refuses to save (best-effort, via `reg`) when `checked` includes a profile
 /// in [`no_access_profiles`] — better to fail the switch than persist a
 /// selection the next Tiltfile reload can't actually clone.
-fn switch_profile(state: &Path, root: &Path, reg: Option<&Registry>, checked: &[String]) {
+///
+/// Redraws both nav buttons itself: the reload restarts the daemon only when the
+/// resource list changed (see [`active_repos`]).
+fn switch_profile(
+    ws: &Workspace,
+    state: &Path,
+    root: &Path,
+    reg: Option<&Registry>,
+    checked: &[String],
+) {
     if let Some(reg) = reg {
         let unreachable = unreachable_profiles(reg);
         let culprits: Vec<&str> = checked
@@ -541,6 +547,14 @@ fn switch_profile(state: &Path, root: &Path, reg: Option<&Registry>, checked: &[
                 tracing::info!("profile selection cleared — nothing runs until you pick a profile");
             } else {
                 tracing::info!(profiles = ?checked, "profile selection saved");
+            }
+            // Expanded from `checked` rather than re-read through
+            // `active_repos`, which would ignore the `state` file we were given.
+            let enabled = reg
+                .map(|r| r.resolve_only(&[], checked))
+                .unwrap_or_default();
+            if let Err(e) = buttons::render_checkout_all(&ws.filter(&enabled, &[]).groups()) {
+                tracing::error!(error = %e, "failed to redraw checkout-all button");
             }
             if let Some(reg) = reg {
                 let unreachable = unreachable_profiles(reg);
@@ -609,6 +623,17 @@ mod tests {
         PathBuf::from("/repo/.git").join(name)
     }
 
+    /// The workspace matching [`broken_repo_registry`]. No path: switching a
+    /// profile only reads these projects' groups.
+    fn broken_repo_ws() -> Workspace {
+        Workspace::plain(vec![Config {
+            name: "broken".to_string(),
+            group: "g".to_string(),
+            resource: "broken".to_string(),
+            ..Default::default()
+        }])
+    }
+
     fn broken_repo_registry(root: &std::path::Path) -> Registry {
         std::fs::write(
             root.join("tilt-devenv.json"),
@@ -627,7 +652,13 @@ mod tests {
         let reg = broken_repo_registry(root.path());
         let state = root.path().join("profiles.json");
 
-        switch_profile(&state, root.path(), Some(&reg), &["bad".to_string()]);
+        switch_profile(
+            &broken_repo_ws(),
+            &state,
+            root.path(),
+            Some(&reg),
+            &["bad".to_string()],
+        );
 
         assert_eq!(
             repos_core::profile::active(&state, root.path()),
@@ -649,7 +680,7 @@ mod tests {
         // Regression: clearing the selection must never be blocked by some
         // other, unrelated repo being unreachable — or nothing could ever
         // un-stick a selection once any repo in the registry broke.
-        switch_profile(&state, root.path(), Some(&reg), &[]);
+        switch_profile(&broken_repo_ws(), &state, root.path(), Some(&reg), &[]);
         assert!(
             repos_core::profile::active(&state, root.path()).is_empty(),
             "clearing the selection must always be possible"

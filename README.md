@@ -55,7 +55,10 @@ it by default — a repo outside the active selection isn't part of what you're 
 no-op); naming a repo exactly via `--only`, or passing `--all`, is a deliberate override and
 always works. `repos profiles` lists every profile regardless of what's active. The nav
 "⎇ checkout all" button follows the same rule: "all" is the active profile's repos, and with
-profiles defined but none picked it does nothing rather than touch the whole registry.
+profiles defined but none picked it does nothing rather than touch the whole registry. Its
+"restrict to group" dropdown lists only groups with a repo the active profiles reach, so every
+choice in it checks out something — a Tiltfile is free to declare a resource per registry repo
+regardless of the selection.
 
 The daemon leaves a profile out of the picker entirely when it resolves to a repo this
 machine can't clone — better than persisting a selection whose repos never arrive.

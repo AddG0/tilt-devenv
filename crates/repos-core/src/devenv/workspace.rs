@@ -98,6 +98,21 @@ impl Workspace {
         Workspace { projects }
     }
 
+    /// The distinct groups these projects belong to, sorted; an ungrouped
+    /// project contributes none. Over a [`filter`](Self::filter)ed workspace:
+    /// the groups that scope reaches.
+    pub fn groups(&self) -> Vec<String> {
+        let mut groups: Vec<String> = self
+            .projects
+            .iter()
+            .map(|p| p.group().to_string())
+            .filter(|g| !g.is_empty())
+            .collect();
+        groups.sort();
+        groups.dedup();
+        groups
+    }
+
     /// Refreshes every project (fetching first when `fetch` is true) and returns
     /// their snapshots, in workspace order. A failed fetch is recorded on the
     /// snapshot's `fetch_err` without blanking the (still-valid) local status.
@@ -157,6 +172,19 @@ impl Workspace {
         });
     }
 
+    /// Makes every project render-inert and tears down its presentation,
+    /// returning the name and error of each that couldn't be torn down —
+    /// retiring the rest regardless, since this runs on the way out.
+    ///
+    /// Sequential, unlike the git ops: it drives the presentation seam, where
+    /// there's nothing to overlap.
+    pub fn retire_all(&self) -> Vec<(String, anyhow::Error)> {
+        self.projects
+            .iter()
+            .filter_map(|p| p.retire().err().map(|e| (p.name().to_string(), e)))
+            .collect()
+    }
+
     /// Clones every project not yet on disk, concurrently. Already-present
     /// projects are reported as-is, untouched.
     pub fn clone_missing(&self) -> Vec<OpResult> {
@@ -197,6 +225,97 @@ mod tests {
             path: path.to_path_buf(),
             ..Default::default()
         }
+    }
+
+    fn grouped(repos: &[(&str, &str)]) -> Workspace {
+        Workspace::plain(
+            repos
+                .iter()
+                .map(|(name, group)| Config {
+                    group: group.to_string(),
+                    ..config(name, Path::new(""))
+                })
+                .collect(),
+        )
+    }
+
+    struct FailingRemove;
+    impl Presenter for FailingRemove {
+        fn render(&self, _: &Snapshot) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove(&self) -> anyhow::Result<()> {
+            anyhow::bail!("tilt refused the delete")
+        }
+    }
+
+    struct RecordRemove(Arc<std::sync::atomic::AtomicBool>);
+    impl Presenter for RecordRemove {
+        fn render(&self, _: &Snapshot) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove(&self) -> anyhow::Result<()> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_retire_the_remaining_projects_after_one_teardown_fails() {
+        let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = torn_down.clone();
+        let ws = Workspace::with_presenter(
+            vec![
+                config("first", Path::new("")),
+                config("second", Path::new("")),
+            ],
+            move |c| match c.name.as_str() {
+                "first" => Box::new(FailingRemove),
+                _ => Box::new(RecordRemove(flag.clone())),
+            },
+        );
+
+        let failed = ws.retire_all();
+
+        assert!(
+            torn_down.load(std::sync::atomic::Ordering::SeqCst),
+            "a failure on the way out must not strand the other projects' buttons"
+        );
+        assert_eq!(
+            failed
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first"],
+        );
+    }
+
+    #[test]
+    fn should_list_each_group_once_in_order() {
+        let ws = grouped(&[("web", "frontend"), ("auth", "backend"), ("ui", "frontend")]);
+
+        assert_eq!(
+            ws.groups(),
+            vec!["backend".to_string(), "frontend".to_string()]
+        );
+    }
+
+    #[test]
+    fn should_leave_an_ungrouped_project_out_of_the_groups() {
+        let ws = grouped(&[("web", "frontend"), ("loose", "")]);
+
+        assert_eq!(ws.groups(), vec!["frontend".to_string()]);
+    }
+
+    #[test]
+    fn should_list_only_the_groups_a_filtered_scope_reaches() {
+        let ws = grouped(&[("web", "frontend"), ("auth", "backend")]);
+
+        assert_eq!(
+            ws.filter(&["web".to_string()], &[]).groups(),
+            vec!["frontend".to_string()],
+            "the name filter left backend empty, so offering it would select nothing"
+        );
     }
 
     #[test]
