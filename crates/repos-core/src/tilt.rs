@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -411,78 +413,292 @@ fn inputs_of(b: &WatchButton) -> HashMap<String, String> {
     m
 }
 
-/// Keeps the `tilt get --watch-only` child alive; killing it on drop ends the
-/// click stream (used at daemon shutdown).
-pub struct ClickWatcher {
-    child: std::process::Child,
+/// One lock over the running child and the stop signal, so a shutdown can't
+/// land between spawning a child and recording it — which would leak it.
+#[derive(Default)]
+struct Watch {
+    stop: bool,
+    child: Option<std::process::Child>,
 }
+
+/// Stops the click stream on drop (used at daemon shutdown).
+pub struct ClickWatcher(Arc<Mutex<Watch>>);
 
 impl Drop for ClickWatcher {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut watch = self.0.lock().unwrap();
+        watch.stop = true;
+        // Killing it ends the supervisor's read, so it sees `stop` rather than
+        // re-establishing the stream.
+        if let Some(mut child) = watch.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
+/// How long to wait before re-establishing a dropped stream. Flat, not backed
+/// off: the daemon is a Tilt child, so a Tilt that stays down kills it rather
+/// than leaving it retrying.
+const RESTREAM_DELAY: Duration = Duration::from_secs(1);
+
 /// Streams UIButton clicks from Tilt's apiserver. A click is reported only when
-/// a button's `lastClickedAt` advances past what it was when watching began, so
-/// re-applying a button's spec (or a click that predates the daemon) isn't
-/// mistaken for a fresh press. The returned [`ClickWatcher`] must be kept alive;
-/// dropping it stops the stream.
+/// a button's `lastClickedAt` advances past what was last seen, so re-applying a
+/// button's spec (or a click that predates the daemon) isn't mistaken for a
+/// fresh press. The returned [`ClickWatcher`] must be kept alive; dropping it
+/// stops the stream.
+///
+/// `tilt get --watch-only` does not survive forever — a Tiltfile re-execution
+/// alone has been observed to end it — so this supervises the child and
+/// re-establishes the stream. A press during the gap still arrives: the stream
+/// opens by emitting every button as it currently stands, so the reconnect
+/// carries a `lastClickedAt` that postdates what was last seen.
+///
+/// Errors when the apiserver can't be reached at all: a caller that can't watch
+/// must say so rather than run on deaf.
 pub fn watch_clicks() -> Result<(tokio::sync::mpsc::UnboundedReceiver<Click>, ClickWatcher)> {
-    let mut last_seen: HashMap<String, String> = HashMap::new();
-    if let Ok(out) = Command::new("tilt")
+    let mut last_seen = seen_at(&buttons_now().context("reading Tilt's buttons to watch them")?);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let watch = Arc::new(Mutex::new(Watch::default()));
+
+    let supervised = watch.clone();
+    std::thread::spawn(move || {
+        loop {
+            if let Err(e) = stream_clicks(&supervised, &mut last_seen, &tx) {
+                tracing::error!(error = %format!("{e:#}"), "couldn't start the click stream");
+            }
+            if supervised.lock().unwrap().stop || tx.is_closed() {
+                return;
+            }
+            std::thread::sleep(RESTREAM_DELAY);
+            tracing::info!("re-establishing the click stream");
+        }
+    });
+
+    Ok((rx, ClickWatcher(watch)))
+}
+
+/// Every button as Tilt currently holds it.
+fn buttons_now() -> Result<Vec<WatchButton>> {
+    let out = Command::new("tilt")
         .args(["get", "uibutton", "-o", "json"])
         .output()
-        && out.status.success()
-        && let Ok(list) = serde_json::from_slice::<WatchList>(&out.stdout)
-    {
-        for b in list.items {
-            last_seen.insert(
-                b.metadata.name,
-                b.status.last_clicked_at.unwrap_or_default(),
-            );
-        }
-    }
+        .context("spawning `tilt get uibutton`")?;
+    check(&out, "tilt get uibutton")?;
+    let list: WatchList =
+        serde_json::from_slice(&out.stdout).context("parsing `tilt get uibutton` output")?;
+    Ok(list.items)
+}
 
+/// Each button's `lastClickedAt`, the baseline a click has to postdate.
+fn seen_at(buttons: &[WatchButton]) -> HashMap<String, String> {
+    buttons
+        .iter()
+        .map(|b| {
+            (
+                b.metadata.name.clone(),
+                b.status.last_clicked_at.clone().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// `b`'s press if it postdates `last_seen`, advancing that entry past it.
+fn click_of(b: &WatchButton, last_seen: &mut HashMap<String, String>) -> Option<Click> {
+    let at = b.status.last_clicked_at.clone().unwrap_or_default();
+    if at.is_empty() || last_seen.get(&b.metadata.name) == Some(&at) {
+        return None;
+    }
+    last_seen.insert(b.metadata.name.clone(), at);
+    Some(Click {
+        button: b.metadata.name.clone(),
+        inputs: inputs_of(b),
+    })
+}
+
+/// Runs one `tilt get --watch-only` until its stream ends, forwarding clicks.
+/// Returning is not an error — the caller re-establishes the stream. Errs only
+/// when the child won't start.
+fn stream_clicks(
+    watch: &Mutex<Watch>,
+    last_seen: &mut HashMap<String, String>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Click>,
+) -> Result<()> {
     let mut child = Command::new("tilt")
         .args(["get", "uibutton", "-o", "json", "--watch-only"])
         .stdout(Stdio::piped())
         .spawn()
         .context("spawning `tilt get --watch-only`")?;
     let stdout = child.stdout.take().expect("stdout was piped");
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        let stream = serde_json::Deserializer::from_reader(stdout).into_iter::<WatchButton>();
-        for item in stream {
-            let Ok(b) = item else {
-                return;
-            };
-            if b.kind != "UIButton" {
-                continue;
-            }
-            let at = b.status.last_clicked_at.clone().unwrap_or_default();
-            if at.is_empty() || last_seen.get(&b.metadata.name) == Some(&at) {
-                continue;
-            }
-            last_seen.insert(b.metadata.name.clone(), at);
-            let click = Click {
-                button: b.metadata.name.clone(),
-                inputs: inputs_of(&b),
-            };
-            if tx.send(click).is_err() {
-                return;
-            }
+    {
+        let mut watch = watch.lock().unwrap();
+        if watch.stop {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
         }
-    });
+        watch.child = Some(child);
+    }
 
-    Ok((rx, ClickWatcher { child }))
+    pump_clicks(stdout, last_seen, tx);
+
+    // Reap it, or a dead watch lingers as a zombie for the daemon's whole life.
+    // Already taken means [`ClickWatcher`] did it: a shutdown, not a fault.
+    if let Some(mut child) = watch.lock().unwrap().child.take() {
+        let _ = child.kill();
+        match child.wait() {
+            Ok(status) => tracing::warn!(%status, "the click stream ended"),
+            Err(e) => tracing::warn!(error = %e, "the click stream ended"),
+        }
+    }
+    Ok(())
+}
+
+/// Forwards each click in a `--watch-only` stream until it ends or the receiver
+/// goes away.
+///
+/// Frames go through [`serde_json::Value`] rather than straight into a
+/// `WatchButton`, which would stop at the first field of the wrong shape —
+/// mid-object, desyncing the stream, so one odd frame costs every click after
+/// it. A `Value` always consumes its whole frame, leaving only malformed JSON
+/// fatal, and nothing later in that stream can recover from it.
+fn pump_clicks<R: std::io::Read>(
+    reader: R,
+    last_seen: &mut HashMap<String, String>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Click>,
+) {
+    for frame in serde_json::Deserializer::from_reader(reader).into_iter::<serde_json::Value>() {
+        let frame = match frame {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(error = %e, "the click stream desynced");
+                return;
+            }
+        };
+        let b: WatchButton = match serde_json::from_value(frame) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping a frame on the click stream that isn't a UIButton");
+                continue;
+            }
+        };
+        if b.kind != "UIButton" {
+            continue;
+        }
+        if let Some(click) = click_of(&b, last_seen)
+            && tx.send(click).is_err()
+        {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `--watch-only` frame for `name`, clicked at `at` (empty = never).
+    fn frame(name: &str, at: &str) -> String {
+        let clicked = if at.is_empty() {
+            "null".to_string()
+        } else {
+            format!("\"{at}\"")
+        };
+        format!(
+            r#"{{"kind":"UIButton","metadata":{{"name":"{name}"}},"status":{{"lastClickedAt":{clicked}}}}}"#
+        )
+    }
+
+    fn pump(stream: &str, last_seen: &mut HashMap<String, String>) -> Vec<Click> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        pump_clicks(std::io::Cursor::new(stream.to_string()), last_seen, &tx);
+        drop(tx);
+        let mut clicks = Vec::new();
+        while let Ok(c) = rx.try_recv() {
+            clicks.push(c);
+        }
+        clicks
+    }
+
+    #[test]
+    fn should_keep_streaming_after_a_frame_that_is_not_a_button() {
+        // An apiserver `Status`: `status` is a string where a UIButton's is an
+        // object, the shape that used to desync the stream.
+        let stream = format!(
+            r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"too old resource version"}} {}"#,
+            frame("repos-profile", "2026-08-13T20:54:15Z")
+        );
+
+        let clicks = pump(&stream, &mut HashMap::new());
+
+        assert_eq!(
+            clicks.iter().map(|c| c.button.as_str()).collect::<Vec<_>>(),
+            vec!["repos-profile"],
+            "one unreadable frame must not cost every click that follows it"
+        );
+    }
+
+    #[test]
+    fn should_stop_reading_once_the_frames_desync() {
+        let stream = format!(
+            "{} {}",
+            frame("repos-profile", "2026-08-13T20:54:15Z"),
+            r#"{"kind":"UIButton","metadata":{"name":"repos-checkout-all""#
+        );
+
+        let clicks = pump(&stream, &mut HashMap::new());
+
+        assert_eq!(
+            clicks.len(),
+            1,
+            "truncated JSON leaves the parser mid-value; only a fresh stream recovers"
+        );
+    }
+
+    #[test]
+    fn should_report_a_button_once_per_press() {
+        let mut last_seen = HashMap::new();
+        let at = "2026-08-13T20:54:15Z";
+
+        let first = pump(&frame("repos-profile", at), &mut last_seen);
+        let repeat = pump(&frame("repos-profile", at), &mut last_seen);
+        let pressed_again = pump(
+            &frame("repos-profile", "2026-08-13T21:00:00Z"),
+            &mut last_seen,
+        );
+
+        assert_eq!(first.len(), 1);
+        assert!(
+            repeat.is_empty(),
+            "re-applying a button's spec re-emits it unchanged; that's not a press"
+        );
+        assert_eq!(pressed_again.len(), 1);
+    }
+
+    #[test]
+    fn should_ignore_a_button_that_was_never_clicked() {
+        let clicks = pump(&frame("repos-profile", ""), &mut HashMap::new());
+
+        assert!(clicks.is_empty());
+    }
+
+    #[test]
+    fn should_report_a_click_that_landed_while_the_stream_was_down() {
+        let unclicked: Vec<WatchButton> =
+            serde_json::from_str(&format!("[{}]", frame("repos-profile", ""))).unwrap();
+        let mut last_seen = seen_at(&unclicked);
+
+        // A reconnect opens with every button as it now stands, the press
+        // included.
+        let reconnect = frame("repos-profile", "2026-08-13T20:54:15Z");
+
+        assert_eq!(pump(&reconnect, &mut last_seen).len(), 1);
+        assert!(
+            pump(&reconnect, &mut last_seen).is_empty(),
+            "and the next reconnect's opening frames must not replay it again"
+        );
+    }
 
     #[test]
     fn inputs_of_reads_choice_and_text() {
