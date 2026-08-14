@@ -3,20 +3,31 @@
 //! One `tilt logs --json` follower for all resources, demuxed into a file per
 //! resource, which lnav opens together. The per-resource files give lnav's Files
 //! panel a toggle per server. Files live in a temp dir cleaned up when lnav exits.
+//!
+//! Each line goes in as a JSON record: the service's line verbatim, plus the
+//! timestamp [`repos_core::logstamp`] chose for it in a field lnav orders by but
+//! never renders.
 
-use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 
+use repos_core::logstamp::{Sink, Stamper, install_lnav_format, physical_lines};
 use repos_core::tilt as client;
 
 use crate::cli::LogsArgs;
+
+/// Well under [`repos_core::logstamp::HEAD_GRACE`], so the grace period is what
+/// decides how long a line waits, not this.
+const TICK: Duration = Duration::from_millis(50);
 
 pub fn run(args: &LogsArgs) -> Result<()> {
     let available = fetch_resources()?;
@@ -29,11 +40,17 @@ pub fn run(args: &LogsArgs) -> Result<()> {
         .tempdir()
         .context("creating a temp dir for per-resource logs")?;
 
+    // Their own subdirectory, so the lnav config beside them can't be taken for a
+    // log and the format's file-pattern has something specific to match.
+    let logs_dir = dir.path().join("logs");
+    fs::create_dir(&logs_dir).with_context(|| format!("creating {}", logs_dir.display()))?;
+    let lnav_config = install_lnav_format(dir.path())?;
+
     // Pre-create a file per resource so lnav lists them all from the start; the
     // demux thread fills them in as lines arrive.
     let mut paths = Vec::new();
     for res in &targets {
-        let path = dir.path().join(res);
+        let path = logs_dir.join(res);
         File::create(&path).with_context(|| format!("creating {}", path.display()))?;
         paths.push(path);
     }
@@ -46,10 +63,14 @@ pub fn run(args: &LogsArgs) -> Result<()> {
         .context("spawning `tilt logs`")?;
     let stdout = tilt.stdout.take().expect("stdout was piped");
 
-    let dir_path = dir.path().to_path_buf();
-    let demux = std::thread::spawn(move || demux(stdout, &dir_path));
+    let demux = std::thread::spawn(move || demux(stdout, &logs_dir));
 
-    let mut lnav = match Command::new("lnav").args(&paths).spawn() {
+    let mut lnav = match Command::new("lnav")
+        .arg("-I")
+        .arg(&lnav_config)
+        .args(&paths)
+        .spawn()
+    {
         Ok(child) => child,
         Err(e) => {
             let _ = tilt.kill();
@@ -76,48 +97,144 @@ pub fn run(args: &LogsArgs) -> Result<()> {
     demux_result
 }
 
-/// Writes each `tilt logs --json` line's raw message into its resource's file,
-/// opening files on first sighting. Ends when the follower's stdout closes
+/// Writes each `tilt logs --json` line into its resource's file as a stamped JSON
+/// record, opening files on first sighting. Ends when the follower's stdout closes
 /// (i.e. after the tilt child is killed).
+///
+/// Reading and the timestamp grace period run on separate threads so a resource
+/// whose first lines carry no timestamp still reaches lnav promptly, even while
+/// the stream is quiet.
 fn demux(stdout: ChildStdout, dir: &Path) -> Result<()> {
-    let mut files: HashMap<String, File> = HashMap::new();
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
-        let Some(entry) = LogLine::parse(&line) else {
-            continue;
-        };
-        if !files.contains_key(&entry.resource) {
-            let path = dir.join(&entry.resource);
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .with_context(|| format!("opening {}", path.display()))?;
-            files.insert(entry.resource.clone(), file);
+    let (tx, rx) = mpsc::channel();
+    let reader = spawn_reader(stdout, tx.clone());
+    let ticker = spawn_ticker(tx);
+
+    let pumped = pump(rx, dir);
+    let read = reader
+        .join()
+        .unwrap_or_else(|_| Err(anyhow!("log reader thread panicked")));
+    // The ticker stops on its next send, once `pump` has dropped the receiver.
+    let _ = ticker.join();
+    pumped.and(read)
+}
+
+/// `Tick` carries nothing: it exists so the grace period can expire while the
+/// stream is quiet.
+enum Event {
+    Line(String),
+    Tick,
+    Eof,
+}
+
+/// Reads the follower's stdout until it closes. A line that isn't valid UTF-8 is
+/// dropped and reading continues — losing one line beats ending the tail — but any
+/// other read error stops it and is reported, rather than looking like the stream
+/// simply ended.
+fn spawn_reader(stdout: ChildStdout, tx: Sender<Event>) -> std::thread::JoinHandle<Result<()>> {
+    std::thread::spawn(move || {
+        let mut mangled = 0u64;
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(Event::Line(line)).is_err() {
+                        return Ok(());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => mangled += 1,
+                Err(e) => {
+                    let _ = tx.send(Event::Eof);
+                    return Err(anyhow::Error::new(e).context("reading `tilt logs` output"));
+                }
+            }
         }
-        let file = files.get_mut(&entry.resource).expect("just inserted");
-        writeln!(file, "{}", entry.message)
-            .with_context(|| format!("writing {} log", entry.resource))?;
+        let _ = tx.send(Event::Eof);
+        if mangled > 0 {
+            eprintln!("repos logs: dropped {mangled} log line(s) that weren't valid UTF-8");
+        }
+        Ok(())
+    })
+}
+
+fn spawn_ticker(tx: Sender<Event>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while tx.send(Event::Tick).is_ok() {
+            std::thread::sleep(TICK);
+        }
+    })
+}
+
+fn pump(rx: Receiver<Event>, dir: &Path) -> Result<()> {
+    let mut sink = Sink::new(dir.to_path_buf());
+    let mut stamper = Stamper::new();
+    let mut unusable = 0u64;
+
+    for event in &rx {
+        match event {
+            Event::Line(line) => {
+                let entry = match LogLine::parse(&line) {
+                    Ok(entry) => entry,
+                    Err(Dropped::NotAResource) => continue,
+                    Err(Dropped::Unusable) => {
+                        unusable += 1;
+                        continue;
+                    }
+                };
+                let now = Instant::now();
+                for physical in physical_lines(&entry.message) {
+                    let ready =
+                        stamper.push(&entry.resource, physical.to_string(), entry.time, now);
+                    sink.write(&entry.resource, &ready)?;
+                }
+            }
+            Event::Tick => {
+                for (resource, ready) in stamper.tick(Instant::now()) {
+                    sink.write(&resource, &ready)?;
+                }
+            }
+            Event::Eof => break,
+        }
+    }
+
+    for (resource, ready) in stamper.drain() {
+        sink.write(&resource, &ready)?;
+    }
+
+    // Not worth failing the tail over, but not worth hiding either.
+    if unusable > 0 {
+        eprintln!("repos logs: skipped {unusable} log line(s) Tilt gave no usable time for");
     }
     Ok(())
 }
 
-/// One line of `tilt logs --json`. Only the fields we re-emit are kept.
-#[derive(Deserialize)]
+/// One line of `tilt logs --json`. Only the fields we use are kept.
+#[derive(Deserialize, Debug)]
 struct LogLine {
     #[serde(default)]
     resource: String,
     #[serde(default)]
     message: String,
+    /// When Tilt handed us the line — second resolution, and attach time for
+    /// replayed history — so it is a fallback, but it does carry the machine's offset.
+    time: DateTime<FixedOffset>,
+}
+
+/// Why a line from the follower produced nothing to write.
+#[derive(Debug, PartialEq, Eq)]
+enum Dropped {
+    /// Tilt talking about itself — banner, version — so there is no file to put it
+    /// in. Every attach emits a few, so this must stay quiet.
+    NotAResource,
+    /// Neither placeable nor datable, so worth mentioning to the user.
+    Unusable,
 }
 
 impl LogLine {
-    fn parse(line: &str) -> Option<LogLine> {
-        let entry: LogLine = serde_json::from_str(line).ok()?;
+    fn parse(line: &str) -> Result<LogLine, Dropped> {
+        let entry: LogLine = serde_json::from_str(line).map_err(|_| Dropped::Unusable)?;
         if entry.resource.is_empty() {
-            return None;
+            return Err(Dropped::NotAResource);
         }
-        Some(entry)
+        Ok(entry)
     }
 }
 
@@ -304,8 +421,19 @@ mod tests {
     }
 
     #[test]
-    fn skips_lines_without_a_resource() {
-        assert!(LogLine::parse(r#"{"message":"no resource"}"#).is_none());
-        assert!(LogLine::parse("not json").is_none());
+    fn treats_tilts_own_output_as_belonging_to_no_resource() {
+        // Counting these as unplaceable ended every run with a spurious warning.
+        let banner = r#"{"time":"2026-07-20T16:44:04-05:00","resource":"","message":"Tilt started on http://localhost:10351/"}"#;
+        assert_eq!(LogLine::parse(banner).unwrap_err(), Dropped::NotAResource);
+    }
+
+    #[test]
+    fn reports_a_line_it_can_place_no_other_way() {
+        assert_eq!(LogLine::parse("not json").unwrap_err(), Dropped::Unusable);
+        assert_eq!(
+            LogLine::parse(r#"{"resource":"redis","message":"hi"}"#).unwrap_err(),
+            Dropped::Unusable,
+            "with no time from Tilt there is nothing left to order the line by"
+        );
     }
 }

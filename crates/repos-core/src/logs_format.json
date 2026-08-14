@@ -1,0 +1,20 @@
+{
+  "$schema": "https://lnav.org/schemas/format-v1.schema.json",
+  "tilt_demux_log": {
+    "title": "Tilt demuxed resource log",
+    "description": "One JSON object per line of a `repos logs` per-resource file: the service's line verbatim in tilt_msg, and the timestamp to order it by in a hidden tilt_ts.",
+    "json": true,
+    "file-pattern": "repos-logs-[^/]+/logs/",
+    "timestamp-field": "tilt_ts",
+    "body-field": "tilt_msg",
+    "level-field": "tilt_level",
+    "line-format": [
+      { "field": "tilt_msg" }
+    ],
+    "value": {
+      "tilt_ts": { "kind": "string", "hidden": true },
+      "tilt_level": { "kind": "string", "hidden": true },
+      "tilt_msg": { "kind": "string" }
+    }
+  }
+}

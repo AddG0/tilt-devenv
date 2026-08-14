@@ -8,6 +8,9 @@
 //!   state), the top-priority input to path resolution.
 //! - [`profile`] — the developer's active profile selection (XDG state),
 //!   persisted the same way as the worktree selection.
+//! - [`logstamp`] — decides the timestamp lnav orders each demuxed Tilt log line
+//!   by, because lnav's own per-file format detection can't be trusted with a mix
+//!   of services' log shapes.
 //! - [`devenv`] — the domain: a [`devenv::Project`] aggregate (one checkout with
 //!   its live state + operations), a [`devenv::Workspace`] collection, and a
 //!   [`devenv::Presenter`] port that adapters (e.g. the daemon's Tilt button
@@ -22,6 +25,7 @@
 
 pub mod devenv;
 pub mod git;
+pub mod logstamp;
 pub mod profile;
 pub mod registry;
 pub mod selfupdate;

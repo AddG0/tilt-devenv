@@ -40,7 +40,15 @@
         # the dev-env that imports this flake).
         rustToolchain = pkgs.rust-bin.stable.latest.default;
         craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
-        src = craneLib.cleanCargoSource ./.;
+        # The default Cargo source filter keeps only Rust and Cargo files, which
+        # would drop the lnav format `repos-core` embeds with include_str!.
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./crates/repos-core/src/logs_format.json
+          ];
+        };
 
         commonArgs = {
           inherit src;
@@ -62,8 +70,9 @@
             # Build both frontend binaries (the CLI and the daemon); repos-core is
             # a library, pulled in as their dependency.
             cargoExtraArgs = "-p repos -p repos-tiltd";
-            # Tests spawn git to build throwaway repos.
-            nativeBuildInputs = [pkgs.installShellFiles pkgs.git];
+            # Tests spawn git to build throwaway repos, and lnav to assert the
+            # merged log order.
+            nativeBuildInputs = [pkgs.installShellFiles pkgs.git pkgs.lnav];
             # Completions so an importing devShell picks them up. The extension
             # ships beside the binary — `../share/repos/tilt/Tiltfile` from
             # `command -v repos` — so one PATH lookup resolves both, and the
@@ -153,8 +162,9 @@
             enable = true;
             entry = pkgs.lib.getExe (pkgs.writeShellApplication {
               name = "cargo-test-offline";
-              # Tests spawn git to build throwaway repos.
-              runtimeInputs = [rustToolchain pkgs.git];
+              # Tests spawn git to build throwaway repos, and lnav to assert the
+              # merged log order.
+              runtimeInputs = [rustToolchain pkgs.git pkgs.lnav];
               text = ''
                 CARGO_HOME=$(mktemp -d)
                 cp ${cargoVendorDir}/config.toml "$CARGO_HOME/config.toml"

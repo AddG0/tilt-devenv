@@ -19,6 +19,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 dirs.workspace = true
 rayon.workspace = true
 # Only the mpsc channel the Tilt click stream delivers on — no runtime — so a
