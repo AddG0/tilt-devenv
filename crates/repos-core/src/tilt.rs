@@ -2,6 +2,10 @@
 //! the `tilt` CLI, and stream button clicks from Tilt's apiserver. Knows nothing
 //! about *which* buttons a caller shows — that's the caller's concern.
 //!
+//! It also answers which Tilt a process belongs to, by walking up the process
+//! tree: every call has to reach that Tilt's apiserver, and the port deciding
+//! that is on its command line rather than anywhere it can be read directly.
+//!
 //! Buttons are created *unowned* (no Tiltfile ownerReference) so the Tiltfile
 //! controller won't reconcile them away. Clicks are delivered by [`watch_clicks`]
 //! and handled in-process by the caller, so an action runs in the watching
@@ -10,7 +14,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -201,6 +205,153 @@ struct UiBool {
     default_value: bool,
 }
 
+/// How far up the process tree to look for `tilt`. Far past the real depth
+/// (tilt -> shell -> daemon), but bounded so a cycle or an odd `ps` reply
+/// can't spin.
+const MAX_ANCESTRY_DEPTH: usize = 64;
+
+/// The pid of the `tilt` this process runs under, for a caller that needs to
+/// signal it — see [`crate::supervisor::request_restart`].
+pub fn ancestor_pid() -> Option<u32> {
+    Some(ancestor()?.pid)
+}
+
+/// The command line of the `tilt` this process is a descendant of, or `None`
+/// outside one (a CLI run from a shell) — the flags Tilt was actually given,
+/// which its environment doesn't reliably reflect.
+fn ancestor_command_line() -> Option<String> {
+    Some(ancestor()?.args)
+}
+
+/// The `tilt` this process descends from.
+fn ancestor() -> Option<Proc> {
+    find_tilt(std::process::id(), ps_info)
+}
+
+/// One process, as `ps` describes it.
+#[derive(Debug, Clone, PartialEq)]
+struct Proc {
+    pid: u32,
+    ppid: u32,
+    /// The executed file's name, reduced to its basename.
+    comm: String,
+    /// The full command line, flags included.
+    args: String,
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Walks up from `pid` through `info` until it finds a `tilt`, returning it.
+/// Ancestry rather than a pidfile: the daemon is spawned by Tilt itself, so the
+/// tree already records the relationship and there's no stale file to clean up.
+fn find_tilt(pid: u32, info: impl Fn(u32) -> Option<Proc>) -> Option<Proc> {
+    let mut pid = pid;
+    for _ in 0..MAX_ANCESTRY_DEPTH {
+        let p = info(pid)?;
+        if p.comm == "tilt" {
+            return Some(p);
+        }
+        if p.ppid == 0 || p.ppid == pid {
+            return None;
+        }
+        pid = p.ppid;
+    }
+    None
+}
+
+/// `pid`'s parent, exec name and command line, via `ps` — portable across Linux
+/// and macOS, unlike reading `/proc`. `-ww` so a long command line isn't
+/// truncated to the terminal width, losing the flags that are the point of it.
+fn ps_info(pid: u32) -> Option<Proc> {
+    let out = Command::new("ps")
+        .args(["-ww", "-o", "ppid=,comm=,args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_ps(pid, &String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parses one `ps -o ppid=,comm=,args=` line. The exec name can itself be a path
+/// (`/nix/store/…/bin/tilt` on macOS), so it's reduced to its basename; the rest
+/// of the line is the command line, spaces and all.
+fn parse_ps(pid: u32, out: &str) -> Option<Proc> {
+    let line = out.lines().next()?.trim();
+    let (ppid, rest) = line.split_once(char::is_whitespace)?;
+    let (comm, args) = rest.trim().split_once(char::is_whitespace)?;
+    Some(Proc {
+        pid,
+        ppid: ppid.trim().parse().ok()?,
+        comm: basename(comm).to_string(),
+        args: args.trim().to_string(),
+    })
+}
+
+/// Tilt's own default web port, which names its context when nothing else does.
+const DEFAULT_PORT: u16 = 10350;
+
+static PORT: LazyLock<Option<u16>> =
+    LazyLock::new(|| port_for(ancestor_command_line().as_deref(), env_port()));
+
+/// The port every `tilt` will be aimed at, or `None` when this process has no
+/// Tilt of its own and the environment decides. A caller that runs under Tilt
+/// should report `None`: the ancestry walk failed, and its calls may reach
+/// another apiserver, or a dead one.
+pub fn apiserver_port() -> Option<u16> {
+    *PORT
+}
+
+/// A `tilt` aimed at the apiserver of the Tilt this process belongs to.
+///
+/// The port decides which context the CLI resolves, and Tilt never exports its
+/// own — so a port left in the environment outranks the `--port` Tilt was given,
+/// and every call lands on another Tilt, or on a dead one. The flag, not the
+/// variable: Tilt documents the flag as overriding it.
+fn tilt() -> Command {
+    let mut cmd = Command::new("tilt");
+    if let Some(port) = *PORT {
+        cmd.args(["--port", &port.to_string()]);
+    }
+    cmd
+}
+
+/// The port Tilt serves on given its command line, resolved as Tilt resolves
+/// it: `--port` beats `TILT_PORT` beats the default. `None` when this process
+/// has no Tilt of its own, where the environment is all there is to go on.
+fn port_for(tilt_args: Option<&str>, env: Option<u16>) -> Option<u16> {
+    let args = tilt_args?;
+    Some(port_from_args(args).or(env).unwrap_or(DEFAULT_PORT))
+}
+
+fn env_port() -> Option<u16> {
+    std::env::var("TILT_PORT").ok()?.trim().parse().ok()
+}
+
+/// The last `--port` Tilt itself was given, matching how its flag parser treats
+/// a repeated flag. Accepts both `--port 10350` and `--port=10350`, and stops at
+/// a bare `--`, after which the flags belong to the Tiltfile.
+fn port_from_args(args: &str) -> Option<u16> {
+    let mut fields = args.split_whitespace().peekable();
+    let mut found = None;
+    while let Some(field) = fields.next() {
+        if field == "--" {
+            break;
+        }
+        let value = match field.strip_prefix("--port") {
+            Some("") => fields.peek().copied(),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        };
+        if let Some(port) = value.and_then(|v| v.trim().parse().ok()) {
+            found = Some(port);
+        }
+    }
+    found
+}
+
 /// Fails with `<what>: <status>: <stderr>` when a `tilt` invocation exited
 /// non-zero, so every callsite reports failures the same way.
 fn check(out: &std::process::Output, what: &str) -> Result<()> {
@@ -218,7 +369,7 @@ fn check(out: &std::process::Output, what: &str) -> Result<()> {
 /// Applies a button to Tilt's apiserver (creates or updates it).
 pub fn apply(button: &UiButton) -> Result<()> {
     let doc = serde_json::to_vec(button)?;
-    let mut child = Command::new("tilt")
+    let mut child = tilt()
         .args(["apply", "-f", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -241,7 +392,7 @@ pub struct Resource {
 /// Every UIResource via `tilt get uiresource -o json`. Erroring here doubles as
 /// a "is Tilt up?" check.
 pub fn uiresources() -> Result<Vec<Resource>> {
-    let out = Command::new("tilt")
+    let out = tilt()
         .args(["get", "uiresource", "-o", "json"])
         .output()
         .context("running `tilt get uiresource`")?;
@@ -285,7 +436,7 @@ fn resources_from_json(json: &[u8]) -> Vec<Resource> {
 /// service resources (the Tiltfile does), so a button it *does* create is the
 /// only signal it directly controls.
 pub fn branch_managed_resources() -> Result<Vec<String>> {
-    let out = Command::new("tilt")
+    let out = tilt()
         .args(["get", "uibutton", "-o", "json"])
         .output()
         .context("running `tilt get uibutton`")?;
@@ -326,7 +477,7 @@ fn branch_managed_from_json(json: &[u8]) -> Vec<String> {
 /// Deletes a UIButton by name. A missing button is not an error.
 pub fn delete_button(name: &str) -> Result<()> {
     tracing::debug!(name, "tilt delete uibutton");
-    let out = Command::new("tilt")
+    let out = tilt()
         .args(["delete", "uibutton", name, "--ignore-not-found"])
         .output()
         .with_context(|| format!("spawning `tilt delete uibutton {name}`"))?;
@@ -337,7 +488,7 @@ pub fn delete_button(name: &str) -> Result<()> {
 /// trigger mode. Used to refresh the git-status resource on a git change.
 pub fn trigger(resource: &str) -> Result<()> {
     tracing::debug!(resource, "tilt trigger");
-    let out = Command::new("tilt")
+    let out = tilt()
         .args(["trigger", resource])
         .output()
         .with_context(|| format!("spawning `tilt trigger {resource}`"))?;
@@ -481,7 +632,7 @@ pub fn watch_clicks() -> Result<(tokio::sync::mpsc::UnboundedReceiver<Click>, Cl
 
 /// Every button as Tilt currently holds it.
 fn buttons_now() -> Result<Vec<WatchButton>> {
-    let out = Command::new("tilt")
+    let out = tilt()
         .args(["get", "uibutton", "-o", "json"])
         .output()
         .context("spawning `tilt get uibutton`")?;
@@ -525,7 +676,7 @@ fn stream_clicks(
     last_seen: &mut HashMap<String, String>,
     tx: &tokio::sync::mpsc::UnboundedSender<Click>,
 ) -> Result<()> {
-    let mut child = Command::new("tilt")
+    let mut child = tilt()
         .args(["get", "uibutton", "-o", "json", "--watch-only"])
         .stdout(Stdio::piped())
         .spawn()
@@ -597,6 +748,7 @@ fn pump_clicks<R: std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// A `--watch-only` frame for `name`, clicked at `at` (empty = never).
     fn frame(name: &str, at: &str) -> String {
@@ -698,6 +850,177 @@ mod tests {
             pump(&reconnect, &mut last_seen).is_empty(),
             "and the next reconnect's opening frames must not replay it again"
         );
+    }
+
+    /// A fake process tree of `(pid, parent pid, exec name, command line)`.
+    fn tree(entries: &[(u32, u32, &str, &str)]) -> impl Fn(u32) -> Option<Proc> + use<> {
+        let map: HashMap<u32, Proc> = entries
+            .iter()
+            .map(|(pid, ppid, comm, args)| {
+                (
+                    *pid,
+                    Proc {
+                        pid: *pid,
+                        ppid: *ppid,
+                        comm: comm.to_string(),
+                        args: args.to_string(),
+                    },
+                )
+            })
+            .collect();
+        move |pid| map.get(&pid).cloned()
+    }
+
+    fn pid_of(found: Option<Proc>) -> Option<u32> {
+        found.map(|p| p.pid)
+    }
+
+    #[test]
+    fn should_find_the_tilt_process_the_daemon_runs_under() {
+        // The real shape: tilt spawns a shell for the serve_cmd, which runs us.
+        let procs = tree(&[
+            (300, 200, "repos-tiltd", "repos-tiltd"),
+            (200, 100, "sh", "sh -c repos-tiltd"),
+            (100, 1, "tilt", "tilt up --port 10352"),
+            (1, 0, "init", "init"),
+        ]);
+        assert_eq!(pid_of(find_tilt(300, procs)), Some(100));
+    }
+
+    #[test]
+    fn should_return_none_when_no_ancestor_is_tilt() {
+        let procs = tree(&[
+            (300, 200, "repos-tiltd", "repos-tiltd"),
+            (200, 1, "zsh", "zsh"),
+            (1, 0, "init", "init"),
+        ]);
+        assert_eq!(pid_of(find_tilt(300, procs)), None);
+    }
+
+    #[test]
+    fn should_stop_rather_than_loop_on_a_self_parenting_process() {
+        let procs = tree(&[(300, 300, "weird", "weird")]);
+        assert_eq!(pid_of(find_tilt(300, procs)), None);
+    }
+
+    #[test]
+    fn should_return_none_when_a_pid_vanishes_mid_walk() {
+        // Processes exit while we're walking; a gap must end the walk, not panic.
+        let procs = tree(&[(300, 200, "repos-tiltd", "repos-tiltd")]);
+        assert_eq!(pid_of(find_tilt(300, procs)), None);
+    }
+
+    #[test]
+    fn should_find_a_tilt_started_through_a_wrapper_script() {
+        // `ps` names such a process after the script, not its interpreter, even
+        // though the command line leads with the interpreter.
+        let procs = tree(&[
+            (300, 200, "repos-tiltd", "repos-tiltd"),
+            (
+                200,
+                1,
+                "tilt",
+                "/bin/sh /usr/local/bin/tilt up --port 10352",
+            ),
+            (1, 0, "init", "init"),
+        ]);
+        let found = find_tilt(300, procs).unwrap();
+        assert_eq!(found.pid, 200);
+        assert!(found.args.contains("--port 10352"));
+    }
+
+    #[test]
+    fn should_not_mistake_a_command_merely_mentioning_tilt_for_tilt() {
+        let procs = tree(&[
+            (300, 200, "repos-tiltd", "repos-tiltd"),
+            (200, 1, "nvim", "nvim /repo/tilt"),
+            (1, 0, "init", "init"),
+        ]);
+        assert_eq!(pid_of(find_tilt(300, procs)), None);
+    }
+
+    #[test]
+    fn should_parse_a_ps_line_into_parent_exec_name_and_command_line() {
+        assert_eq!(
+            parse_ps(9, "  1234 tilt   tilt up --port 10352\n"),
+            Some(Proc {
+                pid: 9,
+                ppid: 1234,
+                comm: "tilt".to_string(),
+                args: "tilt up --port 10352".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn should_reduce_a_ps_exec_path_to_its_basename() {
+        // macOS `ps -o comm=` prints the full executable path.
+        let got = parse_ps(9, " 42 /nix/store/abc-tilt-0.35/bin/tilt tilt up\n").unwrap();
+        assert_eq!(got.comm, "tilt");
+    }
+
+    #[test]
+    fn should_treat_unparseable_ps_output_as_no_parent() {
+        assert_eq!(parse_ps(9, ""), None);
+        assert_eq!(parse_ps(9, "nonsense\n"), None);
+    }
+
+    #[test]
+    fn should_take_the_port_tilt_was_given_over_the_one_in_the_environment() {
+        // The failure this exists for: a shell exporting a port from an older
+        // Tilt, while the running one was started with another.
+        assert_eq!(
+            port_for(Some("tilt up --port 10352"), Some(10351)),
+            Some(10352)
+        );
+    }
+
+    #[test]
+    fn should_fall_back_to_the_environment_when_tilt_was_given_no_port() {
+        assert_eq!(port_for(Some("tilt up"), Some(10351)), Some(10351));
+    }
+
+    #[test]
+    fn should_fall_back_to_tilts_default_when_nothing_names_a_port() {
+        assert_eq!(port_for(Some("tilt up"), None), Some(DEFAULT_PORT));
+    }
+
+    #[test]
+    fn should_leave_the_environment_alone_outside_a_tilt() {
+        assert_eq!(
+            port_for(None, Some(10351)),
+            None,
+            "a CLI run from a shell has no Tilt of its own to read a flag from"
+        );
+    }
+
+    #[test]
+    fn should_read_a_port_written_either_way() {
+        assert_eq!(port_from_args("tilt up --port 10352"), Some(10352));
+        assert_eq!(port_from_args("tilt up --port=10352"), Some(10352));
+    }
+
+    #[test]
+    fn should_take_the_last_port_as_tilts_flag_parser_does() {
+        assert_eq!(port_from_args("tilt up --port 1 --port=2"), Some(2));
+    }
+
+    #[test]
+    fn should_ignore_a_port_the_tiltfile_was_given() {
+        // `tilt up --port A -- --port B` hands B to the Tiltfile's own config
+        // parser; only A is the server's.
+        assert_eq!(
+            port_from_args("tilt up --port 10352 -- --port 9999"),
+            Some(10352)
+        );
+        assert_eq!(port_from_args("tilt up -- --port 9999"), None);
+    }
+
+    #[test]
+    fn should_find_no_port_in_a_flag_that_merely_starts_like_one() {
+        assert_eq!(port_from_args("tilt up --portal 10352"), None);
+        assert_eq!(port_from_args("tilt up --port"), None);
+        assert_eq!(port_from_args("tilt up --port=nonsense"), None);
     }
 
     #[test]

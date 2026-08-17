@@ -70,9 +70,9 @@
             # Build both frontend binaries (the CLI and the daemon); repos-core is
             # a library, pulled in as their dependency.
             cargoExtraArgs = "-p repos -p repos-tiltd";
-            # Tests spawn git to build throwaway repos, and lnav to assert the
-            # merged log order.
-            nativeBuildInputs = [pkgs.installShellFiles pkgs.git pkgs.lnav];
+            # Tests spawn git to build throwaway repos, lnav to assert the merged
+            # log order, and ps to walk up to the Tilt a daemon runs under.
+            nativeBuildInputs = [pkgs.installShellFiles pkgs.git pkgs.lnav pkgs.procps];
             # Completions so an importing devShell picks them up. The extension
             # ships beside the binary — `../share/repos/tilt/Tiltfile` from
             # `command -v repos` — so one PATH lookup resolves both, and the

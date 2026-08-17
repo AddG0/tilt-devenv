@@ -234,6 +234,14 @@ async fn run_daemon(
     // the two share only the tick.
     let polling_dev_env = Arc::new(AtomicBool::new(false));
 
+    match client::apiserver_port() {
+        Some(port) => tracing::info!(port, "talking to Tilt's apiserver"),
+        // Every `tilt` then resolves through TILT_PORT, which Tilt doesn't set
+        // and a shell may have left pointing at an apiserver that is gone.
+        None => tracing::warn!(
+            "couldn't tell which Tilt started this daemon; its buttons may reach the wrong one"
+        ),
+    }
     tracing::info!(
         repos = ws.projects().len(),
         groups = ?groups,
