@@ -135,7 +135,7 @@ fn write_executable(path: &Path, contents: &str) {
 
 /// A `tilt` whose apiserver is gone, the way a stale `TILT_PORT` leaves it:
 /// every query refused.
-const TILT_REFUSING: &str = r#"#!/usr/bin/env bash
+const TILT_REFUSING: &str = r#"#!/bin/sh
 case "$*" in
   "apply -f -") cat >/dev/null ;;
 esac
@@ -145,7 +145,7 @@ exit 1
 
 /// A `tilt` whose click stream delivers one press and then exits, every time —
 /// the daemon has to notice and re-establish it to see the second press.
-const TILT_STREAM_DIES: &str = r#"#!/usr/bin/env bash
+const TILT_STREAM_DIES: &str = r#"#!/bin/sh
 case "$*" in
   "get uibutton -o json")
     echo '{"items":[{"kind":"UIButton","metadata":{"name":"repos-profile"},"status":{"lastClickedAt":null}}]}'
