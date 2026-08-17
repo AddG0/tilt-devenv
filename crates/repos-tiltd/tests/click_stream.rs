@@ -3,11 +3,15 @@
 //!
 //! These failures live in the seam between the daemon and the `tilt` it shells
 //! out to, where a unit test can't reach them.
+//!
+//! Needs `/bin/sh` for the fake, as the crate's other tests need `git`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::LazyLock;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
@@ -75,16 +79,52 @@ impl Drop for Daemon {
     }
 }
 
-/// Starts the daemon with `script` installed as the `tilt` it finds on PATH.
+/// Every fake `tilt`, written before any test spawns a process.
 ///
-/// Registry, XDG state and the fake binary all live in one temp dir, and the
-/// resource spec is empty — no repo, git call or network, so only the click
-/// stream is under test.
-fn start_daemon(script: &str) -> Daemon {
-    let dir = tempfile::TempDir::new().unwrap();
-    let bin = dir.path().join("bin");
+/// Writing a file and exec'ing it is racy once another thread forks: the child
+/// inherits the writable fd, and the kernel refuses to exec a file while one is
+/// open (ETXTBSY) — so a test writing its fake while its sibling starts a daemon
+/// can find its own fake unrunnable. Writing them all before the first fork
+/// leaves no such window.
+static FAKES: LazyLock<Fakes> = LazyLock::new(Fakes::install);
+
+struct Fakes {
+    refusing: PathBuf,
+    stream_dies: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Fakes {
+    fn install() -> Fakes {
+        let dir = tempfile::TempDir::new().unwrap();
+        Fakes {
+            refusing: install_fake(dir.path().join("refusing"), TILT_REFUSING),
+            stream_dies: install_fake(dir.path().join("stream-dies"), TILT_STREAM_DIES),
+            _dir: dir,
+        }
+    }
+}
+
+/// Writes `script` as an executable `tilt` in a fresh `bin`, returning `bin` to
+/// put on a PATH. Runs it once: a fake that won't exec — no interpreter, say —
+/// reports as ENOENT on the spawn, indistinguishable in a daemon's log from a
+/// `tilt` that isn't installed.
+fn install_fake(bin: PathBuf, script: &str) -> PathBuf {
     std::fs::create_dir_all(&bin).unwrap();
-    write_executable(&bin.join("tilt"), script);
+    let fake = bin.join("tilt");
+    write_executable(&fake, script);
+    if let Err(e) = Command::new(&fake).output() {
+        panic!("can't run the fake tilt at {}: {e}", fake.display());
+    }
+    bin
+}
+
+/// Starts the daemon with the fake in `bin` as the `tilt` it finds on PATH.
+///
+/// Registry and XDG state live in one temp dir, and the resource spec is empty —
+/// no repo, git call or network, so only the click stream is under test.
+fn start_daemon(bin: &Path) -> Daemon {
+    let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("tilt-devenv.json"), r#"{"repos":[]}"#).unwrap();
 
     let path = format!(
@@ -164,7 +204,7 @@ exit 0
 
 #[test]
 fn should_report_why_it_cannot_watch_for_clicks() {
-    let mut daemon = start_daemon(TILT_REFUSING);
+    let mut daemon = start_daemon(&FAKES.refusing);
 
     let line = daemon.wait_for_line(&["buttons won't respond"]);
 
@@ -177,7 +217,7 @@ fn should_report_why_it_cannot_watch_for_clicks() {
 
 #[test]
 fn should_keep_answering_clicks_after_the_stream_dies() {
-    let mut daemon = start_daemon(TILT_STREAM_DIES);
+    let mut daemon = start_daemon(&FAKES.stream_dies);
 
     daemon.wait_for_line(&["the click stream ended"]);
     daemon.wait_for_line(&["re-establishing the click stream"]);
