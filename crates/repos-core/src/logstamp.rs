@@ -893,7 +893,15 @@ mod tests {
         }
 
         let out = dir.path().join("order.json");
+        // lnav falls back to `~/.config` for an XDG_CONFIG_HOME that doesn't exist.
+        let lnav_config = dir.path().join("lnav-config");
+        std::fs::create_dir_all(&lnav_config).expect("lnav config dir");
+
         let status = std::process::Command::new("lnav")
+            // `-I` adds a format directory rather than replacing the developer's
+            // own, where a format from another lnav version fails its SQL
+            // compiler — and this test with it.
+            .env("XDG_CONFIG_HOME", &lnav_config)
             .arg("-I")
             .arg(&config)
             .arg("-n")
