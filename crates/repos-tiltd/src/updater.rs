@@ -25,7 +25,9 @@ pub fn refresh_button(dev: &DevEnv, fetch: bool) {
     };
     match result {
         Ok(()) => tracing::debug!(behind, "dev-env update button refreshed"),
-        Err(e) => tracing::error!(error = %e, "refreshing the dev-env update button failed"),
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "refreshing the dev-env update button failed")
+        }
     }
 }
 
@@ -46,7 +48,7 @@ pub fn apply(dev: &DevEnv) {
             tracing::info!("dev environment updated — no dev shell here, so no restart needed");
             refresh_button(dev, false);
         }
-        Err(e) => tracing::error!(error = %e, "updating the dev environment failed"),
+        Err(e) => tracing::error!(error = %format!("{e:#}"), "updating the dev environment failed"),
     }
 }
 

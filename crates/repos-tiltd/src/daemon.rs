@@ -93,7 +93,7 @@ pub fn run(poll: Duration, self_update: bool) -> Result<()> {
     // The spec carries per-resource data only; anything registry-wide (which
     // branches mirror their remote, the profiles) comes from here.
     let reg = Registry::load()
-        .inspect_err(|e| tracing::warn!(error = %e, "couldn't read tilt-devenv.json — the worktree and profile buttons won't work"))
+        .inspect_err(|e| tracing::warn!(error = %format!("{e:#}"), "couldn't read tilt-devenv.json — the worktree and profile buttons won't work"))
         .ok();
     let mirror_branches = reg
         .as_ref()
@@ -215,7 +215,7 @@ async fn run_daemon(
     let (mut click_rx, _click_watcher, _keep_alive) = match client::watch_clicks() {
         Ok((rx, w)) => (rx, Some(w), None),
         Err(e) => {
-            tracing::warn!(error = %e, "buttons won't respond — couldn't watch for clicks; the status table still updates");
+            tracing::warn!(error = %format!("{e:#}"), "buttons won't respond — couldn't watch for clicks; the status table still updates");
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Click>();
             (rx, None, Some(tx))
         }
@@ -303,7 +303,7 @@ async fn run_daemon(
     let ws = ws.clone();
     let _ = tokio::task::spawn_blocking(move || {
         for (repo, e) in ws.retire_all() {
-            tracing::warn!(repo, error = %e, "couldn't remove a repo's buttons on shutdown");
+            tracing::warn!(repo, error = %format!("{e:#}"), "couldn't remove a repo's buttons on shutdown");
         }
         let _ = buttons::remove_global();
     })
@@ -448,7 +448,9 @@ fn select_worktree(p: &Project, branch: &str, root: &Path) {
     };
     match worktree::select(&state, root, p.name(), p.path(), branch) {
         Ok(sel) => tracing::info!(repo = p.name(), %branch, ?sel, "worktree selected"),
-        Err(e) => tracing::warn!(repo = p.name(), %branch, error = %e, "nothing switched"),
+        Err(e) => {
+            tracing::warn!(repo = p.name(), %branch, error = %format!("{e:#}"), "nothing switched")
+        }
     }
 }
 
@@ -465,7 +467,9 @@ fn revert_removed_worktree(root: &Path, id: &str) {
                 Ok(()) => {
                     tracing::info!(repo, worktree_id = id, "worktree removed; reverted to main")
                 }
-                Err(e) => tracing::error!(repo, error = %e, "reverting removed worktree failed"),
+                Err(e) => {
+                    tracing::error!(repo, error = %format!("{e:#}"), "reverting removed worktree failed")
+                }
             }
         }
     }
@@ -489,7 +493,7 @@ fn render_global(
     defined: usize,
 ) {
     if let Err(e) = buttons::render_checkout_all(groups) {
-        tracing::error!(error = %e, "failed to render checkout-all button");
+        tracing::error!(error = %format!("{e:#}"), "failed to render checkout-all button");
     }
     render_profile_picker(selectable, active_profiles, defined);
 }
@@ -504,7 +508,7 @@ fn render_profile_picker(selectable: &[String], active: &[String], defined: usiz
             defined,
             "no profile picker: every profile reaches a repo this machine can't clone"
         ),
-        Err(e) => tracing::error!(error = %e, "failed to render profile button"),
+        Err(e) => tracing::error!(error = %format!("{e:#}"), "failed to render profile button"),
     }
 }
 
@@ -554,7 +558,7 @@ fn switch_profile(
                 .map(|r| r.resolve_only(&[], checked))
                 .unwrap_or_default();
             if let Err(e) = buttons::render_checkout_all(&ws.filter(&enabled, &[]).groups()) {
-                tracing::error!(error = %e, "failed to redraw checkout-all button");
+                tracing::error!(error = %format!("{e:#}"), "failed to redraw checkout-all button");
             }
             if let Some(reg) = reg {
                 let unreachable = unreachable_profiles(reg);
@@ -562,7 +566,7 @@ fn switch_profile(
                 render_profile_picker(&selectable, checked, reg.profiles.len());
             }
         }
-        Err(e) => tracing::error!(error = %e, "saving profile selection failed"),
+        Err(e) => tracing::error!(error = %format!("{e:#}"), "saving profile selection failed"),
     }
 }
 
