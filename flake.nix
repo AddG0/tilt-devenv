@@ -58,6 +58,12 @@
         # Cached dependency layer, reused by the package build and the checks.
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        # What the workspace tests shell out to: git to build throwaway repos, lnav
+        # to assert the merged log order, ps to walk up to the Tilt a daemon runs
+        # under. Shared by both places those tests run — the package build and the
+        # pre-commit hook — so neither can declare a tool the other forgets.
+        testTools = [pkgs.git pkgs.lnav pkgs.procps];
+
         # Vendored deps so the offline clippy pre-commit hook can resolve crates
         # without network — both at `git commit` time AND inside the network-less
         # `nix flake check` sandbox.
@@ -70,9 +76,7 @@
             # Build both frontend binaries (the CLI and the daemon); repos-core is
             # a library, pulled in as their dependency.
             cargoExtraArgs = "-p repos -p repos-tiltd";
-            # Tests spawn git to build throwaway repos, lnav to assert the merged
-            # log order, and ps to walk up to the Tilt a daemon runs under.
-            nativeBuildInputs = [pkgs.installShellFiles pkgs.git pkgs.lnav pkgs.procps];
+            nativeBuildInputs = [pkgs.installShellFiles] ++ testTools;
             # Completions so an importing devShell picks them up. The extension
             # ships beside the binary — `../share/repos/tilt/Tiltfile` from
             # `command -v repos` — so one PATH lookup resolves both, and the
@@ -162,10 +166,13 @@
             enable = true;
             entry = pkgs.lib.getExe (pkgs.writeShellApplication {
               name = "cargo-test-offline";
-              # Tests spawn git to build throwaway repos, and lnav to assert the
-              # merged log order.
-              runtimeInputs = [rustToolchain pkgs.git pkgs.lnav];
+              # Assigned, not runtimeInputs: that prepends to the developer's
+              # PATH, so tests reach tools this flake never declared and fail
+              # only later, in the sandbox. Closed here, they fail at `git
+              # commit`. cc and coreutils stand in for the stdenv the sandbox
+              # puts around `testTools` — cargo needs a linker.
               text = ''
+                export PATH=${pkgs.lib.makeBinPath ([rustToolchain pkgs.stdenv.cc pkgs.coreutils] ++ testTools)}
                 CARGO_HOME=$(mktemp -d)
                 cp ${cargoVendorDir}/config.toml "$CARGO_HOME/config.toml"
                 export CARGO_HOME

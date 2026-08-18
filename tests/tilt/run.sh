@@ -65,8 +65,10 @@ export REPOS_ROOT="$WORK"
 # again, this log stays empty.
 shim_log="$WORK/shim-calls.txt"
 mkdir -p "$WORK/bin"
+# `/bin/sh`, not `/usr/bin/env bash`: the Nix build sandbox has no
+# `/usr/bin/env`, and these two lines need nothing beyond POSIX.
 cat > "$WORK/bin/repos-shim" <<EOF
-#!/usr/bin/env bash
+#!/bin/sh
 echo "\$*" >> "$shim_log"
 exec repos "\$@"
 EOF
