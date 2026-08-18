@@ -378,6 +378,10 @@ fn is_access_denied(stderr: &str) -> bool {
         || s.contains("repository not found")
         || s.contains("access denied")
         || s.contains("authentication failed")
+        // GitLab's wording, matching none of the above — and the same whether
+        // the project is private or absent, since it won't say which.
+        || s.contains("don't have permission")
+        || s.contains("do not have permission")
 }
 
 #[cfg(test)]
@@ -732,6 +736,10 @@ mod tests {
             "Permission denied (publickey).\nfatal: Could not read from remote repository.",
             "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://example.com/repo.git/'",
             "remote: Repository not found.\nfatal: repository 'https://example.com/acme/private.git/' not found",
+            // Verbatim from GitLab over ssh, for a project the key can't see.
+            "remote: ERROR: The project you were looking for could not be found \
+             or you don't have permission to view it.\n\
+             fatal: Could not read from remote repository.",
         ];
         for stderr in denied {
             assert!(is_access_denied(stderr), "expected denied for: {stderr:?}");
