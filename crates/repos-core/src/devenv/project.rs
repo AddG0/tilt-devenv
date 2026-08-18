@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::{
@@ -48,6 +48,34 @@ impl Project {
     }
 
     /// Returns a copy of the project's current cached state.
+    /// The directories whose contents reflect this project's git state: the
+    /// common `.git` — HEAD and index for a main checkout, and `worktrees/`
+    /// appearing — plus `worktrees/` itself once it exists, whose entries hold
+    /// each linked worktree's HEAD. Empty when the repo isn't cloned yet.
+    ///
+    /// Ordered: the first is one directory, the second a tree, and a caller
+    /// watching them has to tell those apart.
+    pub fn git_dirs(&self) -> Vec<PathBuf> {
+        let Some(common) = git::common_dir(&self.cfg.path) else {
+            return Vec::new();
+        };
+        let worktrees = common.join("worktrees");
+        match worktrees.is_dir() {
+            true => vec![common, worktrees],
+            false => vec![common],
+        }
+    }
+
+    /// Where this project would turn up if it were cloned: the deepest directory
+    /// on the way to it that exists, or `None` when nothing on that path does.
+    pub fn arrival_dir(&self) -> Option<PathBuf> {
+        self.cfg
+            .path
+            .ancestors()
+            .find(|a| a.is_dir())
+            .map(Path::to_path_buf)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.inner.lock().unwrap().snap.clone()
     }
@@ -623,6 +651,58 @@ mod tests {
         cfg.url = "/no/such/remote".to_string();
 
         assert!(Project::new(cfg, None).check_access().is_err());
+    }
+
+    #[test]
+    fn should_watch_the_git_dir_of_a_plain_checkout() {
+        gittest::isolate();
+        let repo = gittest::init_repo();
+        let p = Project::new(config("solo", repo.path()), None);
+
+        let dirs = p.git_dirs();
+
+        assert_eq!(dirs.len(), 1, "no worktrees dir until there's a worktree");
+        assert!(dirs[0].ends_with(".git"), "got {dirs:?}");
+    }
+
+    #[test]
+    fn should_watch_the_worktrees_dir_once_a_worktree_exists() {
+        gittest::isolate();
+        let repo = gittest::init_repo();
+        gittest::git(repo.path(), &["branch", "feature"]);
+        let elsewhere = tempfile::TempDir::new().unwrap();
+        let wt = elsewhere.path().join("linked");
+        gittest::git(
+            repo.path(),
+            &["worktree", "add", wt.to_str().unwrap(), "feature"],
+        );
+        let p = Project::new(config("shared", repo.path()), None);
+
+        let dirs = p.git_dirs();
+
+        assert_eq!(dirs.len(), 2, "got {dirs:?}");
+        assert!(dirs[1].ends_with("worktrees"), "and it comes second");
+    }
+
+    #[test]
+    fn should_watch_nothing_of_a_repo_that_is_not_cloned() {
+        gittest::isolate();
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = Project::new(config("absent", &dir.path().join("nope")), None);
+
+        assert!(p.git_dirs().is_empty());
+    }
+
+    #[test]
+    fn should_expect_an_absent_repo_in_the_deepest_directory_that_exists() {
+        gittest::isolate();
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = Project::new(
+            config("absent", &dir.path().join("services/deep/repo")),
+            None,
+        );
+
+        assert_eq!(p.arrival_dir().as_deref(), Some(dir.path()));
     }
 
     #[test]

@@ -86,6 +86,23 @@ impl Daemon {
         }
     }
 
+    fn wait_for_record_count(&mut self, needle: &str, count: usize) -> String {
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            let calls = std::fs::read_to_string(&self.records).unwrap_or_default();
+            if calls.lines().filter(|l| l.contains(needle)).count() >= count {
+                return calls;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "fewer than {count} calls containing {needle:?} within {DEADLINE:?}; the fake logged:\n{calls}\nthe daemon logged:\n{}",
+                    self.seen.join("\n")
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn line_with(&self, needles: &[&str]) -> Option<String> {
         self.seen
             .iter()
@@ -159,6 +176,19 @@ fn start_daemon(bin: &Path) -> Daemon {
     spawn_daemon(cmd, bin)
 }
 
+/// Starts the daemon watching one repo at `repo`, with `poll` as its interval —
+/// an hour of it leaves an arrival no explanation but the filesystem event.
+fn start_daemon_watching(bin: &Path, resource: &str, repo: &Path, poll: &str) -> Daemon {
+    let spec = format!(
+        r#"[{{"resource":"{resource}","repo":"{resource}","path":"{}","group":""}}]"#,
+        repo.display()
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_repos-tiltd"));
+    cmd.args(["--no-self-update", "--poll", poll])
+        .env("REPOS_TILT_SPEC", spec);
+    spawn_daemon(cmd, bin)
+}
+
 /// Starts the daemon as the child of a process that looks like `tilt up --port
 /// <port>`, with `TILT_PORT` set to `stale` — the shape that broke in the field,
 /// where the daemon has to believe the flag over the environment.
@@ -177,6 +207,7 @@ fn start_daemon_under_tilt(bin: &Path, port: &str, stale: &str) -> Daemon {
 /// no repo, git call or network, so only the click stream is under test.
 fn spawn_daemon(mut cmd: Command, bin: &Path) -> Daemon {
     let dir = tempfile::TempDir::new().unwrap();
+    let spec_given = cmd.get_envs().any(|(k, _)| k == "REPOS_TILT_SPEC");
     std::fs::write(dir.path().join("tilt-devenv.json"), r#"{"repos":[]}"#).unwrap();
     let records = dir.path().join("tilt-calls");
 
@@ -185,23 +216,25 @@ fn spawn_daemon(mut cmd: Command, bin: &Path) -> Daemon {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut child = cmd
+    cmd
         // Its own group, so shutdown reaches a daemon started underneath a
         // launcher as surely as one started directly.
         .process_group(0)
         .env("PATH", path)
         .env("REPOS_ROOT", dir.path())
         .env("XDG_STATE_HOME", dir.path().join("state"))
-        .env("REPOS_TILT_SPEC", "[]")
         .env("FAKE_TILT_STATE", &records)
         .env("RUST_LOG", "info")
         // A `tilt` the daemon runs without piping inherits this; a fake reading
         // stdin would otherwise block on the test runner's terminal.
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawning the daemon");
+        .stderr(Stdio::piped());
+    // No repo at all unless the caller named one.
+    if !spec_given {
+        cmd.env("REPOS_TILT_SPEC", "[]");
+    }
+    let mut child = cmd.spawn().expect("spawning the daemon");
 
     let stderr = child.stderr.take().expect("stderr was piped");
     let (tx, lines) = channel();
@@ -294,6 +327,31 @@ case "$*" in
 esac
 exit 0
 "#;
+
+#[test]
+fn should_watch_a_repo_that_is_cloned_after_it_starts() {
+    let work = tempfile::TempDir::new().unwrap();
+    let repo = work.path().join("late-arrival");
+    let mut daemon = start_daemon_watching(&FAKES.records_args, "late-arrival", &repo, "1h");
+
+    daemon.wait_for_line(&["not watching repo (no git dir)", "late-arrival"]);
+    let initial_calls = daemon.wait_for_record("apply -f -");
+    let initial_renders = initial_calls
+        .lines()
+        .filter(|l| l.contains("apply -f -"))
+        .count();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-q", repo.to_str().unwrap()])
+            .status()
+            .expect("git on PATH")
+            .success()
+    );
+
+    daemon.wait_for_line(&["watching repo, now that it's cloned", "late-arrival"]);
+    daemon.wait_for_record_count("apply -f -", initial_renders + 1);
+}
 
 #[test]
 fn should_report_why_it_cannot_watch_for_clicks() {

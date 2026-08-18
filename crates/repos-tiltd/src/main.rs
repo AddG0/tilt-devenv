@@ -9,10 +9,12 @@
 //! Tiltfile). The user-facing commands live in the sibling `repos` binary; the
 //! shared domain + Tilt client live in `repos-core`.
 
+mod actions;
 mod buttons;
 mod daemon;
 mod debounce;
 mod updater;
+mod watches;
 
 use std::process::ExitCode;
 use std::time::Duration;
