@@ -47,7 +47,6 @@ impl Project {
         &self.cfg.path
     }
 
-    /// Returns a copy of the project's current cached state.
     /// The directories whose contents reflect this project's git state: the
     /// common `.git` — HEAD and index for a main checkout, and `worktrees/`
     /// appearing — plus `worktrees/` itself once it exists, whose entries hold

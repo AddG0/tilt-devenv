@@ -250,7 +250,7 @@ fn find_tilt(pid: u32, info: impl Fn(u32) -> Option<Proc>) -> Option<Proc> {
     let mut pid = pid;
     for _ in 0..MAX_ANCESTRY_DEPTH {
         let p = info(pid)?;
-        if p.comm == "tilt" {
+        if is_tilt_proc(&p) {
             return Some(p);
         }
         if p.ppid == 0 || p.ppid == pid {
@@ -259,6 +259,17 @@ fn find_tilt(pid: u32, info: impl Fn(u32) -> Option<Proc>) -> Option<Proc> {
         pid = p.ppid;
     }
     None
+}
+
+fn is_tilt_proc(p: &Proc) -> bool {
+    if p.comm == "tilt" {
+        return true;
+    }
+    let mut args = p.args.split_whitespace().map(basename);
+    matches!(
+        (args.next(), args.next()),
+        (Some("tilt"), _) | (Some("sh" | "bash" | "zsh" | "dash"), Some("tilt"))
+    )
 }
 
 /// `pid`'s parent, exec name and command line, via `ps` — portable across Linux
@@ -912,8 +923,6 @@ mod tests {
 
     #[test]
     fn should_find_a_tilt_started_through_a_wrapper_script() {
-        // `ps` names such a process after the script, not its interpreter, even
-        // though the command line leads with the interpreter.
         let procs = tree(&[
             (300, 200, "repos-tiltd", "repos-tiltd"),
             (
@@ -921,6 +930,23 @@ mod tests {
                 1,
                 "tilt",
                 "/bin/sh /usr/local/bin/tilt up --port 10352",
+            ),
+            (1, 0, "init", "init"),
+        ]);
+        let found = find_tilt(300, procs).unwrap();
+        assert_eq!(found.pid, 200);
+        assert!(found.args.contains("--port 10352"));
+    }
+
+    #[test]
+    fn should_find_a_tilt_script_when_ps_reports_the_interpreter() {
+        let procs = tree(&[
+            (300, 200, "repos-tiltd", "repos-tiltd"),
+            (
+                200,
+                1,
+                "sh",
+                "/bin/sh /nix/store/fake/bin/tilt up --port 10352",
             ),
             (1, 0, "init", "init"),
         ]);

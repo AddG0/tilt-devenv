@@ -90,10 +90,7 @@ impl Watches {
         }
     }
 
-    /// Takes up the watches every project now warrants: its git dirs once it's
-    /// cloned, otherwise the directory it would arrive in.
-    ///
-    /// Run again on each arrival, and on each poll as a backstop: a repo cloned
+    /// Run on each arrival, and on each poll as a backstop: a repo cloned
     /// later — by a profile switch, or the first checkout of a missing one —
     /// would otherwise never be watched, since a Tiltfile whose resource list
     /// doesn't change never restarts the daemon. `startup` reports the repos that
@@ -143,7 +140,6 @@ impl Watches {
         newly_watched
     }
 
-    /// Interprets one filesystem event and updates the active watches it implies.
     pub(crate) fn handle_event(
         &mut self,
         watcher: &mut notify::RecommendedWatcher,
@@ -179,7 +175,6 @@ impl Watches {
         effects
     }
 
-    /// Watches `p`'s git state, reporting whether there was any to watch.
     fn watch_git(
         &mut self,
         watcher: &mut notify::RecommendedWatcher,
@@ -245,8 +240,6 @@ impl Watches {
             && self.arrivals.iter().any(|dir| path.starts_with(dir))
     }
 
-    /// The projects a filesystem event under `path` concerns — every one whose
-    /// watched dir is an ancestor of it, so resources sharing a repo all refresh.
     fn projects_at(&self, path: &Path) -> impl Iterator<Item = &Arc<Project>> {
         self.git
             .iter()

@@ -169,15 +169,12 @@ fn install_fake(bin: PathBuf, script: &str) -> PathBuf {
     bin
 }
 
-/// Starts the daemon with the fake in `bin` as the `tilt` it finds on PATH.
 fn start_daemon(bin: &Path) -> Daemon {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_repos-tiltd"));
     cmd.arg("--no-self-update");
     spawn_daemon(cmd, bin)
 }
 
-/// Starts the daemon watching one repo at `repo`, with `poll` as its interval —
-/// an hour of it leaves an arrival no explanation but the filesystem event.
 fn start_daemon_watching(bin: &Path, resource: &str, repo: &Path, poll: &str) -> Daemon {
     let spec = format!(
         r#"[{{"resource":"{resource}","repo":"{resource}","path":"{}","group":""}}]"#,
@@ -200,9 +197,6 @@ fn start_daemon_under_tilt(bin: &Path, port: &str, stale: &str) -> Daemon {
     spawn_daemon(cmd, bin)
 }
 
-/// Runs `cmd` — the daemon, or something that starts it — with the environment
-/// the daemon needs.
-///
 /// Registry and XDG state live in one temp dir, and the resource spec is empty —
 /// no repo, git call or network, so only the click stream is under test.
 fn spawn_daemon(mut cmd: Command, bin: &Path) -> Daemon {
@@ -230,7 +224,6 @@ fn spawn_daemon(mut cmd: Command, bin: &Path) -> Daemon {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    // No repo at all unless the caller named one.
     if !spec_given {
         cmd.env("REPOS_TILT_SPEC", "[]");
     }
