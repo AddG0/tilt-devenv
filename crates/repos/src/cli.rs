@@ -17,6 +17,11 @@ use repos_core::registry::Registry;
     version
 )]
 pub struct Cli {
+    /// Tilt's web port, when `repos` runs outside the Tilt it should talk to —
+    /// the one `tilt up --port` was given. Defaults to the Tilt this process
+    /// descends from, so a `repos` Tilt itself started needs no flag.
+    #[arg(long, global = true, value_name = "PORT")]
+    pub port: Option<u16>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -329,6 +334,38 @@ mod tests {
     #[test]
     fn completes_segment_after_comma() {
         assert_eq!(complete_segment(&three(), "web,w"), ["web,worker"]);
+    }
+
+    #[test]
+    fn accepts_the_port_after_the_subcommand() {
+        // Regression: `--port` after the subcommand was an unexpected argument.
+        let cli = Cli::try_parse_from(["repos", "logs", "--port", "10352"]).unwrap();
+
+        assert_eq!(cli.port, Some(10352));
+        let Command::Logs(logs) = cli.command else {
+            panic!("expected the logs subcommand")
+        };
+        assert!(
+            logs.resources.is_empty(),
+            "the port is a flag, not a resource to tail"
+        );
+    }
+
+    #[test]
+    fn accepts_the_port_before_the_subcommand() {
+        let cli = Cli::try_parse_from(["repos", "--port", "10352", "logs"]).unwrap();
+        assert_eq!(cli.port, Some(10352));
+    }
+
+    #[test]
+    fn defaults_to_no_port_so_the_tilt_ancestry_decides() {
+        let cli = Cli::try_parse_from(["repos", "logs"]).unwrap();
+        assert_eq!(cli.port, None);
+    }
+
+    #[test]
+    fn rejects_a_port_that_is_not_a_number() {
+        assert!(Cli::try_parse_from(["repos", "logs", "--port", "nonsense"]).is_err());
     }
 
     #[test]

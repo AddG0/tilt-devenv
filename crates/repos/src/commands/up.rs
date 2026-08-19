@@ -25,7 +25,7 @@ enum Launch {
     Direct,
 }
 
-pub fn run(args: &UpArgs) -> Result<()> {
+pub fn run(args: &UpArgs, port: Option<u16>) -> Result<()> {
     let root = registry::find_root()?;
     let marker = supervisor::marker_path();
     if let Some(dir) = marker.parent() {
@@ -46,7 +46,7 @@ pub fn run(args: &UpArgs) -> Result<()> {
         // that once held this pid would restart us the moment Tilt exits.
         let _ = std::fs::remove_file(&marker);
 
-        let mut cmd = tilt_command(launch, &root, &args.tilt_args);
+        let mut cmd = tilt_command(launch, &root, port, &args.tilt_args);
         cmd.env(supervisor::MARKER_ENV, &marker);
         // Ctrl-C reaches Tilt directly and it exits non-zero — an ordinary
         // quit, so the marker rather than the exit code decides on a rerun.
@@ -81,19 +81,26 @@ fn nix_available() -> bool {
 /// Builds one pass's command. The working directory is inherited, so `tilt`
 /// finds the same Tiltfile it would have on its own — `root` only names the
 /// flake to enter.
-fn tilt_command(launch: Launch, root: &Path, tilt_args: &[String]) -> Command {
+///
+/// `tilt_args` comes after `port`, so an explicit `repos up -- --port` still wins:
+/// Tilt takes the last one.
+fn tilt_command(launch: Launch, root: &Path, port: Option<u16>, tilt_args: &[String]) -> Command {
+    let port_args: Vec<String> = port
+        .map(|p| vec!["--port".to_string(), p.to_string()])
+        .unwrap_or_default();
     match launch {
         Launch::NixDevelop => {
             let mut cmd = Command::new("nix");
             cmd.arg("develop")
                 .arg(root)
                 .args(["--command", "tilt", "up"])
+                .args(&port_args)
                 .args(tilt_args);
             cmd
         }
         Launch::Direct => {
             let mut cmd = Command::new("tilt");
-            cmd.arg("up").args(tilt_args);
+            cmd.arg("up").args(&port_args).args(tilt_args);
             cmd
         }
     }
@@ -152,9 +159,31 @@ mod tests {
 
     #[test]
     fn should_pass_extra_arguments_through_to_tilt_up() {
-        let cmd = tilt_command(Launch::Direct, Path::new("/env"), &["--stream".to_string()]);
+        let cmd = tilt_command(
+            Launch::Direct,
+            Path::new("/env"),
+            None,
+            &["--stream".to_string()],
+        );
         assert_eq!(cmd.get_program(), "tilt");
         assert_eq!(args_of(&cmd), ["up", "--stream"]);
+    }
+
+    #[test]
+    fn should_forward_the_global_port_to_tilt_up() {
+        let cmd = tilt_command(Launch::Direct, Path::new("/env"), Some(10352), &[]);
+        assert_eq!(args_of(&cmd), ["up", "--port", "10352"]);
+    }
+
+    #[test]
+    fn should_let_a_trailing_port_win_over_the_global_one() {
+        let cmd = tilt_command(
+            Launch::Direct,
+            Path::new("/env"),
+            Some(10352),
+            &["--port".to_string(), "10355".to_string()],
+        );
+        assert_eq!(args_of(&cmd), ["up", "--port", "10352", "--port", "10355"]);
     }
 
     #[test]
@@ -162,6 +191,7 @@ mod tests {
         let cmd = tilt_command(
             Launch::NixDevelop,
             Path::new("/env"),
+            None,
             &["--stream".to_string()],
         );
         assert_eq!(cmd.get_program(), "nix");

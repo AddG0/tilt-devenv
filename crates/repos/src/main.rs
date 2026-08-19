@@ -23,8 +23,12 @@ fn main() -> ExitCode {
     init_tracing();
 
     let cli = cli::Cli::parse();
+    // Before anything reaches Tilt, so every later call resolves the same port.
+    if let Some(port) = cli.port {
+        repos_core::tilt::set_apiserver_port(port);
+    }
     let result = match &cli.command {
-        cli::Command::Up(a) => commands::up::run(a),
+        cli::Command::Up(a) => commands::up::run(a, cli.port),
         cli::Command::Update => commands::update::run(),
         cli::Command::Clone(a) => commands::clone::run(a),
         cli::Command::Status(a) => commands::status::run(a),

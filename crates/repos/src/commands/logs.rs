@@ -31,8 +31,7 @@ const TICK: Duration = Duration::from_millis(50);
 
 pub fn run(args: &LogsArgs) -> Result<()> {
     let available = fetch_resources()?;
-    let branch_managed = client::branch_managed_resources()
-        .context("couldn't reach Tilt — is `tilt up` running?")?;
+    let branch_managed = client::branch_managed_resources().with_context(tilt_unreachable)?;
     let targets = resolve_targets(args, &available, &branch_managed)?;
 
     let dir = tempfile::Builder::new()
@@ -258,7 +257,17 @@ pub fn complete_resource(current: &OsStr) -> Vec<clap_complete::engine::Completi
 /// The current Tilt resources. Doubles as the "is Tilt running?" pre-flight —
 /// a failure here means there's nothing to tail.
 fn fetch_resources() -> Result<Vec<client::Resource>> {
-    client::uiresources().context("couldn't reach Tilt — is `tilt up` running?")
+    client::uiresources().with_context(tilt_unreachable)
+}
+
+/// Reaching the wrong Tilt looks exactly like reaching none — the port tells them apart.
+fn tilt_unreachable() -> String {
+    match client::apiserver_port() {
+        Some(port) => format!("couldn't reach Tilt on port {port} — is it running?"),
+        None => "couldn't reach Tilt — is `tilt up` running? Pass `--port` if it \
+                 serves on one other than 10350."
+            .to_string(),
+    }
 }
 
 /// The resources to tail: those named, or every repo-backed resource when

@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -307,12 +307,21 @@ const DEFAULT_PORT: u16 = 10350;
 static PORT: LazyLock<Option<u16>> =
     LazyLock::new(|| port_for(ancestor_command_line().as_deref(), env_port()));
 
-/// The port every `tilt` will be aimed at, or `None` when this process has no
-/// Tilt of its own and the environment decides. A caller that runs under Tilt
-/// should report `None`: the ancestry walk failed, and its calls may reach
-/// another apiserver, or a dead one.
+static PINNED_PORT: OnceLock<u16> = OnceLock::new();
+
+/// Aims every later `tilt` call at `port`, for a caller that knows which Tilt it
+/// means but doesn't descend from one — a CLI run from a shell. The first call wins.
+pub fn set_apiserver_port(port: u16) {
+    // Already set means a caller pinned twice: decided, not failed.
+    let _ = PINNED_PORT.set(port);
+}
+
+/// The port every `tilt` will be aimed at: a pin from [`set_apiserver_port`],
+/// else the Tilt this process descends from. `None` leaves the choice to the
+/// environment — a caller that runs under Tilt should report it, since the
+/// ancestry walk failed and its calls may reach another apiserver, or a dead one.
 pub fn apiserver_port() -> Option<u16> {
-    *PORT
+    PINNED_PORT.get().copied().or(*PORT)
 }
 
 /// A `tilt` aimed at the apiserver of the Tilt this process belongs to.
@@ -323,7 +332,7 @@ pub fn apiserver_port() -> Option<u16> {
 /// variable: Tilt documents the flag as overriding it.
 fn tilt() -> Command {
     let mut cmd = Command::new("tilt");
-    if let Some(port) = *PORT {
+    if let Some(port) = apiserver_port() {
         cmd.args(["--port", &port.to_string()]);
     }
     cmd
