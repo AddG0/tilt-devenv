@@ -2,6 +2,7 @@
 //! ahead/behind sync indicator, the checkout/pull result lines, and the aligned
 //! tables. Formats `repos_core` value objects for a person reading a terminal.
 
+use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 
@@ -352,7 +353,7 @@ pub fn print_list_table(repos: &[Resolved], no_access: Option<&BTreeMap<String, 
 }
 
 /// Renders every named profile and the repos/groups it enables as a table.
-pub fn print_profiles_table(profiles: &BTreeMap<String, Vec<String>>) {
+pub fn print_profiles_table(profiles: &IndexMap<String, Vec<String>>) {
     let unicode = std::io::stdout().is_terminal();
     let color = color_enabled();
     let mut t = new_table(&["PROFILE", "ENABLES"], unicode, color);

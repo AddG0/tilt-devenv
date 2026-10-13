@@ -2,6 +2,7 @@
 //! that the Tiltfile and scripts consume — field order and skip rules are part
 //! of that contract, so keep them stable.
 
+use indexmap::IndexMap;
 use std::collections::BTreeMap;
 
 use anyhow::Result;
@@ -78,7 +79,7 @@ pub fn print_list_json(
     print_json(&items)
 }
 
-pub fn print_profiles_json(profiles: &BTreeMap<String, Vec<String>>) -> Result<()> {
+pub fn print_profiles_json(profiles: &IndexMap<String, Vec<String>>) -> Result<()> {
     print_json(profiles)
 }
 

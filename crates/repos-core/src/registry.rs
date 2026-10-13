@@ -5,7 +5,8 @@
 //! This is the base the CLI builds on: it answers "which repos exist, and where
 //! do they live on this machine".
 
-use std::collections::{BTreeMap, HashMap};
+use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -41,7 +42,7 @@ struct RegistryConfig {
     /// Named sets of repos (Tilt profiles / `repos --profile`): profile name ->
     /// the repo or group names it enables.
     #[serde(default)]
-    profiles: BTreeMap<String, Vec<String>>,
+    profiles: IndexMap<String, Vec<String>>,
     /// Branches rebuilt and force-pushed upstream, so syncing replaces the local
     /// copy instead of merging. Empty falls back to [`DEFAULT_MIRROR_BRANCHES`].
     #[serde(default, rename = "mirrorBranches")]
@@ -63,7 +64,7 @@ impl RegistryFile {
             RegistryFile::Bare(repos) => RegistryConfig {
                 workspace: String::new(),
                 repos,
-                profiles: BTreeMap::new(),
+                profiles: IndexMap::new(),
                 mirror_branches: Vec::new(),
             },
             RegistryFile::Config(cfg) => cfg,
@@ -88,7 +89,7 @@ pub struct Registry {
     pub root: PathBuf,
     pub repos: Vec<Repo>,
     /// Profile name -> the repo or group names it enables.
-    pub profiles: BTreeMap<String, Vec<String>>,
+    pub profiles: IndexMap<String, Vec<String>>,
     /// Branches that mirror their remote — see [`crate::devenv::Snapshot::mirror`].
     pub mirror_branches: Vec<String>,
     /// Base dir for the sibling layout.
@@ -718,6 +719,23 @@ mod tests {
     }
 
     #[test]
+    fn profiles_keep_the_order_they_are_declared_in() {
+        let root = TempDir::new().unwrap();
+        write_file(
+            root.path(),
+            "tilt-devenv.json",
+            r#"{"repos":[{"name":"foo","url":"u","group":"g"}],
+                "profiles":{"zeta":["foo"],"alpha":["foo"],"mid":["foo"]}}"#,
+        );
+
+        let reg = Registry::load_from(root.path()).unwrap();
+        assert_eq!(
+            reg.selectable_profiles(&[]),
+            vec!["zeta".to_string(), "alpha".to_string(), "mid".to_string()]
+        );
+    }
+
+    #[test]
     fn expand_profiles_resolves_a_repo_name_member_directly() {
         let root = TempDir::new().unwrap();
         write_file(
@@ -959,7 +977,7 @@ mod tests {
         let mut reg = Registry {
             root: dir.path().to_path_buf(),
             repos: Vec::new(),
-            profiles: BTreeMap::new(),
+            profiles: IndexMap::new(),
             mirror_branches: Vec::new(),
             workspace: dir.path().to_path_buf(),
             overrides: HashMap::new(),
